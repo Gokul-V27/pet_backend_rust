@@ -16,6 +16,20 @@ pub fn check_strength(password: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A plain sanity check (one @, a dot in the domain, no spaces); the real check is that sign-in works.
+pub fn looks_like_email(e: &str) -> bool {
+    let Some((local, domain)) = e.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !e.chars().any(char::is_whitespace)
+        && e.len() <= 254
+}
+
 pub fn hash(password: &str) -> anyhow::Result<String> {
     // The salt is generated from the operating system's random source (argon2's `getrandom` feature).
     Argon2::default()
@@ -52,6 +66,15 @@ mod tests {
         assert!(verify("correct horse battery staple", &h));
         assert!(!verify("correct horse battery stapler", &h));
         assert!(!verify("anything", "not-a-hash"));
+    }
+
+    #[test]
+    fn email_sanity() {
+        assert!(looks_like_email("gokul@gmail.com"));
+        assert!(!looks_like_email("your-email"));
+        assert!(!looks_like_email("a@b"));
+        assert!(!looks_like_email("a b@gmail.com"));
+        assert!(!looks_like_email("@gmail.com"));
     }
 
     #[test]

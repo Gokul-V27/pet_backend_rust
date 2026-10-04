@@ -70,6 +70,13 @@ async fn create_admin(db: &sqlx::PgPool, args: &[String]) -> anyhow::Result<()> 
             "usage: create-admin <email> \"<full name>\" <super_admin|admin|order_manager|inventory_manager|support>   (password on stdin)"
         );
     };
+    let email = email.trim().to_lowercase();
+    if !wagwell_api::services::password::looks_like_email(&email) {
+        bail!("\"{email}\" isn't an email address — use your real email, e.g. name@gmail.com");
+    }
+    if name.trim().is_empty() || name.trim().eq_ignore_ascii_case("your name") {
+        bail!("give your real name, e.g. \"Gokul\"");
+    }
     let role = AdminRole::from_str(role).map_err(|_| anyhow::anyhow!("unknown role {role}"))?;
     let mut pw = String::new();
     std::io::stdin().lock().read_line(&mut pw)?;
@@ -78,7 +85,7 @@ async fn create_admin(db: &sqlx::PgPool, args: &[String]) -> anyhow::Result<()> 
 
     let hash = password::hash(pw)?;
     let id: uuid::Uuid = sqlx::query_scalar("INSERT INTO admin_users (email, name, role, password_hash) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(email.trim().to_lowercase())
+        .bind(&email)
         .bind(name.trim())
         .bind(role.as_str())
         .bind(hash)

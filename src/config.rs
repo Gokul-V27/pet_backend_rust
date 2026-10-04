@@ -107,10 +107,33 @@ impl Config {
             (None, None) => None,
             _ => bail!("set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither"),
         };
+        let bind = if let Some(bind) = get("BIND") {
+            if (get("RENDER").is_some() || get("PORT").is_some())
+                && (bind.starts_with("127.0.0.1:") || bind.starts_with("localhost:"))
+            {
+                let port = get("PORT")
+                    .unwrap_or_else(|| bind.rsplit(':').next().unwrap_or("8080").to_string());
+                tracing::warn!(
+                    "cloud deployment detected with loopback BIND; overriding host to 0.0.0.0:{port}"
+                );
+                format!("0.0.0.0:{port}")
+            } else {
+                bind
+            }
+        } else if let Some(port) = get("PORT") {
+            let host = get("HOST").unwrap_or_else(|| "0.0.0.0".into());
+            format!("{host}:{port}")
+        } else {
+            let host = get("HOST").unwrap_or_else(|| match env {
+                Env::Production => "0.0.0.0".into(),
+                Env::Development => "127.0.0.1".into(),
+            });
+            format!("{host}:8080")
+        };
         Ok(Self {
             env,
             storage,
-            bind: get("BIND").unwrap_or_else(|| "127.0.0.1:8080".into()),
+            bind,
             database_url,
             cors_origins,
             otp_pepper,
@@ -204,5 +227,43 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn bind_defaults_based_on_environment() {
+        let prod = cfg(&[("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)]).unwrap();
+        assert_eq!(prod.bind, "0.0.0.0:8080");
+
+        let dev = cfg(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("APP_ENV", "development"),
+        ])
+        .unwrap();
+        assert_eq!(dev.bind, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn bind_respects_port_env_var() {
+        let c = cfg(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("PORT", "10000"),
+        ])
+        .unwrap();
+        assert_eq!(c.bind, "0.0.0.0:10000");
+    }
+
+    #[test]
+    fn bind_overrides_loopback_in_cloud() {
+        let c = cfg(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("BIND", "127.0.0.1:8080"),
+            ("RENDER", "true"),
+            ("PORT", "10000"),
+        ])
+        .unwrap();
+        assert_eq!(c.bind, "0.0.0.0:10000");
     }
 }

@@ -1,0 +1,208 @@
+//! Settings come from environment variables and are checked once at start-up, so a missing or
+//! unsafe value stops the server immediately instead of failing later.
+
+use anyhow::{Context, bail};
+use axum::http::HeaderValue;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Env {
+    Development,
+    Production,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub env: Env,
+    pub bind: String,
+    pub database_url: String,
+    /// Websites allowed to call the API with cookies.
+    pub cors_origins: Vec<HeaderValue>,
+    /// Mixed into stored one-time-code hashes.
+    pub otp_pepper: String,
+    /// Development only: write one-time codes to the log instead of sending an SMS.
+    pub otp_dev_echo: bool,
+    /// Image storage (S3-compatible, e.g. Supabase Storage). `None` = uploads switched off.
+    pub storage: Option<StorageConfig>,
+}
+
+#[derive(Clone)]
+pub struct StorageConfig {
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// Where shoppers' browsers load the files from, e.g.
+    /// https://<ref>.supabase.co/storage/v1/object/public/<bucket>
+    pub public_base_url: String,
+}
+
+// Never print the keys, even in debug logs.
+impl std::fmt::Debug for StorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConfig")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("public_base_url", &self.public_base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Config {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Takes a lookup function so tests can supply values without touching the real environment.
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        // Anything other than an explicit "development" is treated as production (the safe way round).
+        let env = match get("APP_ENV").as_deref() {
+            Some("development") => Env::Development,
+            _ => Env::Production,
+        };
+        let database_url = get("DATABASE_URL").context("DATABASE_URL is required")?;
+        let otp_pepper = get("OTP_PEPPER").context("OTP_PEPPER is required")?;
+        if otp_pepper.len() < 32 {
+            bail!("OTP_PEPPER must be at least 32 characters (openssl rand -hex 32)");
+        }
+        let otp_dev_echo = get("OTP_DEV_ECHO").is_some_and(|v| v == "true");
+        if otp_dev_echo && env == Env::Production {
+            bail!("OTP_DEV_ECHO=true is not allowed unless APP_ENV=development");
+        }
+        let cors_origins = get("CORS_ORIGINS")
+            .unwrap_or_else(|| "http://localhost:3000,http://localhost:3001".into())
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s == "*" {
+                    bail!("CORS_ORIGINS must list real origins, not *");
+                }
+                s.trim_end_matches('/')
+                    .parse::<HeaderValue>()
+                    .with_context(|| format!("bad CORS origin {s}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let storage = match (get("S3_ACCESS_KEY_ID"), get("S3_SECRET_ACCESS_KEY")) {
+            (Some(access_key_id), Some(secret_access_key)) => {
+                let need = |k: &str| {
+                    get(k).with_context(|| format!("{k} is required when S3 keys are set"))
+                };
+                let public_base_url = need("STORAGE_PUBLIC_URL")?.trim_end_matches('/').to_owned();
+                if !public_base_url.starts_with("https://") && env == Env::Production {
+                    bail!("STORAGE_PUBLIC_URL must be https in production");
+                }
+                Some(StorageConfig {
+                    // Exactly one trailing slash: the S3 client appends "<bucket>/<key>" to the endpoint's
+                    // path, and without it Supabase's ".../s3" + "image_pet" becomes ".../s3image_pet".
+                    endpoint: format!("{}/", need("S3_ENDPOINT")?.trim_end_matches('/')),
+                    region: need("S3_REGION")?,
+                    bucket: need("S3_BUCKET")?,
+                    access_key_id,
+                    secret_access_key,
+                    public_base_url,
+                })
+            }
+            (None, None) => None,
+            _ => bail!("set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither"),
+        };
+        Ok(Self {
+            env,
+            storage,
+            bind: get("BIND").unwrap_or_else(|| "127.0.0.1:8080".into()),
+            database_url,
+            cors_origins,
+            otp_pepper,
+            otp_dev_echo,
+        })
+    }
+
+    /// Cookies are only sent over HTTPS outside development.
+    pub fn cookie_secure(&self) -> bool {
+        self.env == Env::Production
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn cfg(pairs: &[(&str, &str)]) -> anyhow::Result<Config> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::from_lookup(|k| m.get(k).cloned())
+    }
+
+    const PEPPER: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn defaults_to_production() {
+        let c = cfg(&[("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)]).unwrap();
+        assert_eq!(c.env, Env::Production);
+        assert!(c.cookie_secure());
+        assert_eq!(c.cors_origins.len(), 2);
+    }
+
+    #[test]
+    fn short_pepper_is_refused() {
+        assert!(cfg(&[("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", "short")]).is_err());
+    }
+
+    #[test]
+    fn dev_echo_is_refused_in_production() {
+        let bad = cfg(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("OTP_DEV_ECHO", "true"),
+        ]);
+        assert!(bad.is_err());
+        let ok = cfg(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("OTP_DEV_ECHO", "true"),
+            ("APP_ENV", "development"),
+        ])
+        .unwrap();
+        assert!(ok.otp_dev_echo && !ok.cookie_secure());
+    }
+
+    #[test]
+    fn storage_needs_both_keys_and_hides_them_in_debug() {
+        let base = [("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)];
+        assert!(cfg(&base).unwrap().storage.is_none());
+        let mut half = base.to_vec();
+        half.push(("S3_ACCESS_KEY_ID", "id"));
+        assert!(cfg(&half).is_err());
+        let mut full = half.clone();
+        full.extend([
+            ("S3_SECRET_ACCESS_KEY", "super-secret-value"),
+            ("S3_ENDPOINT", "https://s3.example/"),
+            ("S3_REGION", "ap-southeast-1"),
+            ("S3_BUCKET", "image_pet"),
+            (
+                "STORAGE_PUBLIC_URL",
+                "https://cdn.example/public/image_pet/",
+            ),
+        ]);
+        let s = cfg(&full).unwrap().storage.unwrap();
+        assert_eq!(s.public_base_url, "https://cdn.example/public/image_pet");
+        assert_eq!(s.endpoint, "https://s3.example/");
+        assert!(!format!("{s:?}").contains("super-secret-value"));
+    }
+
+    #[test]
+    fn wildcard_cors_is_refused() {
+        assert!(
+            cfg(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("OTP_PEPPER", PEPPER),
+                ("CORS_ORIGINS", "*")
+            ])
+            .is_err()
+        );
+    }
+}

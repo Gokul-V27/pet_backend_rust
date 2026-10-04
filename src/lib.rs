@@ -1,6 +1,7 @@
 //! Wagwell API: one server for the shop and the admin website.
 
 pub mod auth;
+pub mod catalogue;
 pub mod config;
 pub mod error;
 pub mod models;

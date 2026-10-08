@@ -21,6 +21,8 @@ pub struct Config {
     pub otp_pepper: String,
     /// Development only: write one-time codes to the log instead of sending an SMS.
     pub otp_dev_echo: bool,
+    /// Development only: every sign-in code is this one (6 digits) instead of a random code.
+    pub otp_dev_code: Option<String>,
     /// Image storage (S3-compatible, e.g. Supabase Storage). `None` = uploads switched off.
     pub storage: Option<StorageConfig>,
     /// Online payments. `None` = only cash on delivery is offered.
@@ -111,6 +113,15 @@ impl Config {
         let otp_dev_echo = get("OTP_DEV_ECHO").is_some_and(|v| v == "true");
         if otp_dev_echo && env == Env::Production {
             bail!("OTP_DEV_ECHO=true is not allowed unless APP_ENV=development");
+        }
+        let otp_dev_code = get("OTP_DEV_CODE").map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+        if let Some(code) = &otp_dev_code {
+            if env == Env::Production {
+                bail!("OTP_DEV_CODE is not allowed unless APP_ENV=development");
+            }
+            if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("OTP_DEV_CODE must be exactly 6 digits");
+            }
         }
         let cors_origins = get("CORS_ORIGINS")
             .unwrap_or_else(|| "http://localhost:3000,http://localhost:3001".into())
@@ -212,6 +223,7 @@ impl Config {
             cors_origins,
             otp_pepper,
             otp_dev_echo,
+            otp_dev_code,
         })
     }
 
@@ -265,6 +277,21 @@ mod tests {
         ])
         .unwrap();
         assert!(ok.otp_dev_echo && !ok.cookie_secure());
+    }
+
+    #[test]
+    fn fixed_dev_code_is_development_only_and_six_digits() {
+        let base = [("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut v = base.to_vec();
+            v.extend_from_slice(extra);
+            cfg(&v)
+        };
+        assert!(with(&[("OTP_DEV_CODE", "369369")]).is_err());
+        assert!(with(&[("OTP_DEV_CODE", "4321"), ("APP_ENV", "development")]).is_err());
+        let ok = with(&[("OTP_DEV_CODE", "369369"), ("APP_ENV", "development")]).unwrap();
+        assert_eq!(ok.otp_dev_code.as_deref(), Some("369369"));
+        assert!(cfg(&base).unwrap().otp_dev_code.is_none());
     }
 
     #[test]

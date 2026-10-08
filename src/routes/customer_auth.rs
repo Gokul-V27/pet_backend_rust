@@ -64,7 +64,11 @@ async fn request_code(
         ));
     }
 
-    let code = otp::new_code()?;
+    // Development only (refused in production by Config): a fixed code, so testers needn't read the log.
+    let code = match &s.cfg.otp_dev_code {
+        Some(fixed) => fixed.clone(),
+        None => otp::new_code()?,
+    };
     let code_id: uuid::Uuid = sqlx::query_scalar("INSERT INTO otp_codes (mobile, code_hash, expires_at) VALUES ($1, $2, now() + ($3::int * interval '1 minute')) RETURNING id")
         .bind(&mobile)
         .bind(otp::hash_code(&s.cfg.otp_pepper, &mobile, &code))

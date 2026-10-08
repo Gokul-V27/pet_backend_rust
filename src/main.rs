@@ -51,11 +51,52 @@ async fn main() -> anyhow::Result<()> {
         Some(s) => tracing::info!(bucket = %s.bucket, "image storage on"),
         None => tracing::warn!("image storage off (no S3 keys set)"),
     }
+    let razorpay = match cfg.razorpay.clone() {
+        Some(r) => {
+            tracing::info!(key_id = %r.key_id, "online payments on (Razorpay)");
+            Some(wagwell_api::services::razorpay::Razorpay::new(r)?)
+        }
+        None => {
+            tracing::warn!("online payments off (no Razorpay keys set): cash on delivery only");
+            None
+        }
+    };
+    let sms = match cfg.sms.clone() {
+        Some(c) => {
+            tracing::info!("sign-in codes by SMS on (MSG91)");
+            Some(wagwell_api::services::sms::Sms::new(c)?)
+        }
+        None if cfg.otp_dev_echo => {
+            tracing::warn!("no SMS provider: sign-in codes go to this log (development only)");
+            None
+        }
+        None => {
+            tracing::error!(
+                "no SMS provider (MSG91_AUTH_KEY, MSG91_OTP_TEMPLATE_ID): customers cannot sign in"
+            );
+            None
+        }
+    };
     let state = AppState {
         db,
         cfg: Arc::new(cfg),
         storage,
+        razorpay,
+        sms,
     };
+    // Every 5 minutes: close online orders left unpaid for 30 minutes and put their stock back.
+    let jobs_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            match wagwell_api::services::orders::expire_unpaid(&jobs_db).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(closed = n, "closed unpaid orders"),
+                Err(e) => tracing::error!(error = ?e, "unpaid-order clean-up failed"),
+            }
+        }
+    });
     axum::serve(listener, wagwell_api::app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

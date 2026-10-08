@@ -31,6 +31,25 @@ pub fn router(pool: PgPool) -> Router {
         db: pool,
         cfg: Arc::new(config()),
         storage: None,
+        razorpay: None,
+        sms: None,
+    })
+}
+
+/// The same app with Razorpay test keys configured (webhook secret: `hook-secret`).
+pub fn router_with_razorpay(pool: PgPool) -> Router {
+    let rzp = wagwell_api::services::razorpay::Razorpay::new(wagwell_api::config::RazorpayConfig {
+        key_id: "rzp_test_x".to_owned(),
+        key_secret: "key-secret".to_owned(),
+        webhook_secret: "hook-secret".to_owned(),
+    })
+    .unwrap();
+    app(AppState {
+        db: pool,
+        cfg: Arc::new(config()),
+        storage: None,
+        razorpay: Some(rzp),
+        sms: None,
     })
 }
 

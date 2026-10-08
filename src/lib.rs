@@ -38,6 +38,8 @@ pub fn app(state: AppState) -> Router {
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static(routes::SECURITY_HEADER),
+            // Order placement sends one so a retried checkout can never make a second order.
+            HeaderName::from_static("idempotency-key"),
         ])
         .max_age(Duration::from_secs(600));
 

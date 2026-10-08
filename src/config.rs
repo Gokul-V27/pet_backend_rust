@@ -23,6 +23,48 @@ pub struct Config {
     pub otp_dev_echo: bool,
     /// Image storage (S3-compatible, e.g. Supabase Storage). `None` = uploads switched off.
     pub storage: Option<StorageConfig>,
+    /// Online payments. `None` = only cash on delivery is offered.
+    pub razorpay: Option<RazorpayConfig>,
+    /// `None` when no SMS provider is set: customers can't sign in outside development.
+    pub sms: Option<SmsConfig>,
+}
+
+/// MSG91 (sign-in codes by SMS). Server-only.
+#[derive(Clone)]
+pub struct SmsConfig {
+    pub auth_key: String,
+    /// The DLT-approved OTP template in MSG91.
+    pub template_id: String,
+    /// The template's variable that holds the code (`##otp##` → `otp`).
+    pub code_var: String,
+}
+
+#[derive(Clone)]
+pub struct RazorpayConfig {
+    /// Public id, also sent to the browser to open Razorpay Checkout.
+    pub key_id: String,
+    /// Server-only. Signs API calls and checkout signatures.
+    pub key_secret: String,
+    /// Server-only. Checks that webhooks really come from Razorpay.
+    pub webhook_secret: String,
+}
+
+// Never print the secrets, even in debug logs.
+/// The auth key never appears in logs.
+impl std::fmt::Debug for SmsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmsConfig")
+            .field("template_id", &self.template_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RazorpayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RazorpayConfig")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -107,6 +149,36 @@ impl Config {
             (None, None) => None,
             _ => bail!("set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither"),
         };
+        let razorpay = match (get("RAZORPAY_KEY_ID"), get("RAZORPAY_KEY_SECRET")) {
+            (Some(key_id), Some(key_secret)) => {
+                let webhook_secret = get("RAZORPAY_WEBHOOK_SECRET")
+                    .context("RAZORPAY_WEBHOOK_SECRET is required when Razorpay keys are set")?;
+                if !key_id.starts_with("rzp_") {
+                    bail!("RAZORPAY_KEY_ID should start with rzp_test_ or rzp_live_");
+                }
+                if key_id.starts_with("rzp_live_") && env == Env::Development {
+                    bail!(
+                        "live Razorpay keys are not allowed with APP_ENV=development; use rzp_test_ keys"
+                    );
+                }
+                Some(RazorpayConfig {
+                    key_id,
+                    key_secret,
+                    webhook_secret,
+                })
+            }
+            (None, None) => None,
+            _ => bail!("set both RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET, or neither"),
+        };
+        let sms = match (get("MSG91_AUTH_KEY"), get("MSG91_OTP_TEMPLATE_ID")) {
+            (Some(auth_key), Some(template_id)) => Some(SmsConfig {
+                auth_key,
+                template_id,
+                code_var: get("MSG91_OTP_VAR").unwrap_or_else(|| "otp".into()),
+            }),
+            (None, None) => None,
+            _ => bail!("set both MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID, or neither"),
+        };
         let bind = if let Some(bind) = get("BIND") {
             if (get("RENDER").is_some() || get("PORT").is_some())
                 && (bind.starts_with("127.0.0.1:") || bind.starts_with("localhost:"))
@@ -133,6 +205,8 @@ impl Config {
         Ok(Self {
             env,
             storage,
+            razorpay,
+            sms,
             bind,
             database_url,
             cors_origins,
@@ -265,5 +339,33 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(c.bind, "0.0.0.0:10000");
+    }
+
+    #[test]
+    fn razorpay_needs_all_three_and_test_keys_in_development() {
+        let base = [
+            ("DATABASE_URL", "postgres://x"),
+            ("OTP_PEPPER", PEPPER),
+            ("APP_ENV", "development"),
+        ];
+        assert!(cfg(&base).unwrap().razorpay.is_none());
+        let mut half = base.to_vec();
+        half.push(("RAZORPAY_KEY_ID", "rzp_test_abc"));
+        assert!(cfg(&half).is_err());
+        let mut no_hook = half.clone();
+        no_hook.push(("RAZORPAY_KEY_SECRET", "s3cret"));
+        assert!(cfg(&no_hook).is_err());
+        let mut full = no_hook.clone();
+        full.push(("RAZORPAY_WEBHOOK_SECRET", "w3bhook"));
+        let c = cfg(&full).unwrap();
+        let shown = format!("{:?}", c.razorpay);
+        assert!(
+            shown.contains("rzp_test_abc")
+                && !shown.contains("s3cret")
+                && !shown.contains("w3bhook")
+        );
+        let mut live = full.clone();
+        live[3] = ("RAZORPAY_KEY_ID", "rzp_live_abc");
+        assert!(cfg(&live).is_err());
     }
 }

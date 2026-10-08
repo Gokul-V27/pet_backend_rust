@@ -32,6 +32,50 @@ impl AdminRole {
         )
     }
 
+    /// Everyone on staff can look at orders (support answers customers about them).
+    pub fn can_view_orders(self) -> bool {
+        true
+    }
+
+    /// Moving orders along: pack, ship, deliver, cancel.
+    pub fn can_manage_orders(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin | Self::OrderManager)
+    }
+
+    /// Sending money back, and the books (journal, P&L, GST).
+    pub fn can_handle_money(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin)
+    }
+
+    /// Editing products and categories (prices included). The admin website's permission table
+    /// gives everyone else a read-only view.
+    pub fn can_edit_catalogue(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin)
+    }
+
+    /// Stock counts: receiving, write-offs, corrections.
+    pub fn can_adjust_stock(self) -> bool {
+        matches!(
+            self,
+            Self::SuperAdmin | Self::Admin | Self::InventoryManager
+        )
+    }
+
+    /// Coupons, offers, free samples, review moderation, care schedules and shop settings.
+    pub fn can_run_marketing(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin)
+    }
+
+    /// Customer message templates (support writes the replies customers get).
+    pub fn can_edit_messages(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin | Self::Support)
+    }
+
+    /// Who did what in the admin.
+    pub fn can_view_audit(self) -> bool {
+        matches!(self, Self::SuperAdmin)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SuperAdmin => "super_admin",

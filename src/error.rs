@@ -29,6 +29,28 @@ pub enum AppError {
     InvalidCredentials,
     #[error("{0}")]
     RateLimited(String),
+    /// Not enough stock for an item (message names it).
+    #[error("{0}")]
+    OutOfStock(String),
+    /// The browser's total differs from the server's; `total` is the server's, in rupees.
+    #[error("prices changed since you opened checkout: the total is now ₹{total}")]
+    PriceChanged { total: i64 },
+    /// Online payments aren't configured or the gateway is down.
+    #[error("online payment isn't available right now; cash on delivery still works")]
+    PaymentsUnavailable,
+    /// No SMS provider, or it refused: sign-in codes can't be sent.
+    #[error("we can't send sign-in codes right now; please try again in a few minutes")]
+    SmsUnavailable,
+    /// The same Idempotency-Key was reused for an order that is already closed
+    /// (payment failed or cancelled): start a new checkout with a new key.
+    #[error("that checkout has ended: please try again")]
+    OrderClosed,
+    /// The same Idempotency-Key was reused with a different basket, address or slot.
+    #[error("that request was already used for a different order: please try again")]
+    IdempotencyKeyReused,
+    /// A payment confirmation that didn't check out (bad signature, wrong amount, not yours).
+    #[error("we couldn't confirm that payment")]
+    PaymentNotVerified,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -56,6 +78,29 @@ impl AppError {
                 self.to_string(),
             ),
             Self::RateLimited(m) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", m.clone()),
+            Self::OutOfStock(m) => (StatusCode::CONFLICT, "out_of_stock", m.clone()),
+            Self::PriceChanged { .. } => (StatusCode::CONFLICT, "price_changed", self.to_string()),
+            Self::OrderClosed => (StatusCode::CONFLICT, "order_closed", self.to_string()),
+            Self::IdempotencyKeyReused => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "idempotency_key_reused",
+                self.to_string(),
+            ),
+            Self::PaymentsUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "payments_unavailable",
+                self.to_string(),
+            ),
+            Self::SmsUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sms_unavailable",
+                self.to_string(),
+            ),
+            Self::PaymentNotVerified => (
+                StatusCode::BAD_REQUEST,
+                "payment_not_verified",
+                self.to_string(),
+            ),
             Self::Db(_) | Self::Other(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
@@ -108,6 +153,20 @@ mod tests {
         assert_eq!(
             AppError::Db(sqlx::Error::RowNotFound).parts().0,
             StatusCode::NOT_FOUND
+        );
+        let (status, code, msg) = AppError::PriceChanged { total: 1082 }.parts();
+        assert_eq!((status, code), (StatusCode::CONFLICT, "price_changed"));
+        assert!(msg.contains("₹1082"));
+        assert_eq!(AppError::OutOfStock("x".into()).parts().1, "out_of_stock");
+        assert_eq!(AppError::OrderClosed.parts().1, "order_closed");
+        assert_eq!(AppError::OrderClosed.parts().0, StatusCode::CONFLICT);
+        assert_eq!(
+            AppError::IdempotencyKeyReused.parts().0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            AppError::PaymentsUnavailable.parts().0,
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 }

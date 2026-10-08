@@ -65,21 +65,31 @@ async fn request_code(
     }
 
     let code = otp::new_code()?;
-    sqlx::query("INSERT INTO otp_codes (mobile, code_hash, expires_at) VALUES ($1, $2, now() + ($3::int * interval '1 minute'))")
+    let code_id: uuid::Uuid = sqlx::query_scalar("INSERT INTO otp_codes (mobile, code_hash, expires_at) VALUES ($1, $2, now() + ($3::int * interval '1 minute')) RETURNING id")
         .bind(&mobile)
         .bind(otp::hash_code(&s.cfg.otp_pepper, &mobile, &code))
         .bind(otp::CODE_LIFETIME_MINUTES as i32)
-        .execute(&s.db)
+        .fetch_one(&s.db)
         .await?;
 
     if s.cfg.otp_dev_echo {
         // Development only (refused in production by Config): no SMS provider needed to test sign-in.
         tracing::warn!(%mobile, %code, "DEV ONLY: one-time code");
     } else {
-        // Fail closed: never pretend a code was sent. An SMS provider (e.g. MSG91, DLT-registered) plugs in here.
-        return Err(AppError::Other(anyhow::anyhow!(
-            "no SMS provider configured"
-        )));
+        // Fail closed: never say a code was sent when it wasn't. The unsent code is removed so the
+        // customer can ask again straight away.
+        let sent = match &s.sms {
+            Some(sms) => sms.send_code(&mobile, &code).await,
+            None => Err(anyhow::anyhow!("no SMS provider configured")),
+        };
+        if let Err(e) = sent {
+            tracing::error!(error = ?e, "sign-in code not sent");
+            sqlx::query("DELETE FROM otp_codes WHERE id = $1")
+                .bind(code_id)
+                .execute(&s.db)
+                .await?;
+            return Err(AppError::SmsUnavailable);
+        }
     }
 
     Ok(Json(json!({
@@ -93,6 +103,16 @@ async fn request_code(
 struct VerifyCode {
     mobile: String,
     code: String,
+    /// The name the customer typed on the sign-in form, if any. Kept when it's blank.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A display name from the sign-in form: printable characters only, at most 80, never blank.
+fn clean_name(raw: Option<&str>) -> Option<String> {
+    let name: String = raw?.chars().filter(|c| !c.is_control()).take(80).collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
 }
 
 async fn verify_code(
@@ -137,11 +157,12 @@ async fn verify_code(
         .await?;
 
     let customer: Customer = sqlx::query_as(
-        "INSERT INTO customers (mobile) VALUES ($1)
-         ON CONFLICT (mobile) DO UPDATE SET updated_at = now()
+        "INSERT INTO customers (mobile, name) VALUES ($1, $2)
+         ON CONFLICT (mobile) DO UPDATE SET name = COALESCE($2, customers.name), updated_at = now()
          RETURNING id, mobile, name, email",
     )
     .bind(&mobile)
+    .bind(clean_name(req.name.as_deref()))
     .fetch_one(&mut *tx)
     .await?;
 
@@ -187,4 +208,23 @@ async fn logout(State(s): State<AppState>, jar: CookieJar) -> Result<(CookieJar,
         jar.add(clear_cookie(CUSTOMER_COOKIE, s.cfg.cookie_secure())),
         Json(json!({ "signed_out": true })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_name;
+
+    #[test]
+    fn names_are_tidied_and_blank_ones_ignored() {
+        assert_eq!(
+            clean_name(Some("  Priya   Test \n")),
+            Some("Priya Test".into())
+        );
+        assert_eq!(clean_name(Some("   ")), None);
+        assert_eq!(clean_name(None), None);
+        assert_eq!(
+            clean_name(Some(&"x".repeat(200))).map(|n| n.len()),
+            Some(80)
+        );
+    }
 }

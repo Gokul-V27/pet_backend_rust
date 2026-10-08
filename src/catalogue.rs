@@ -310,9 +310,16 @@ pub struct InventoryTxn {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdjustStockInput {
+    /// Ignored: the variant's own product is recorded. Kept so older clients still parse.
+    #[serde(default)]
     pub product_id: String,
     pub variant_id: String,
+    /// The change (+ adds, - removes). Ignored when `counted` is given.
+    #[serde(default)]
     pub qty: i32,
+    /// A stock count: set the stock to exactly this.
+    #[serde(default)]
+    pub counted: Option<i32>,
     #[serde(rename = "type")]
     pub txn_type: String,
     pub reason: String,

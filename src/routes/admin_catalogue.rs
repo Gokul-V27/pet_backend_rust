@@ -453,27 +453,55 @@ async fn delete_offer_by_id(
 
 // ═════════════════════════ Inventory ═════════════════════════
 
+#[derive(sqlx::FromRow)]
+struct TxnRow {
+    id: String,
+    variant_id: String,
+    product_id: String,
+    #[sqlx(rename = "type")]
+    txn_type: String,
+    qty: i32,
+    before_qty: i32,
+    after_qty: i32,
+    reason: String,
+    by_whom: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    batch_no: Option<String>,
+    mfg_date: Option<chrono::NaiveDate>,
+    expiry_date: Option<chrono::NaiveDate>,
+    unit_cost: Option<i32>,
+    receipt_id: Option<uuid::Uuid>,
+}
+
 async fn list_inventory_txns(
     State(s): State<AppState>,
     _admin: AdminAuth,
 ) -> Result<Json<Vec<InventoryTxn>>> {
-    let rows: Vec<(String, String, String, String, i32, i32, i32, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT id, variant_id, product_id, type, qty, before_qty, after_qty, reason, by_whom, created_at
-         FROM inventory_txns ORDER BY created_at DESC LIMIT 500"
-    ).fetch_all(&s.db).await?;
+    let rows: Vec<TxnRow> = sqlx::query_as(
+        "SELECT id, variant_id, product_id, type, qty, before_qty, after_qty, reason, by_whom, created_at,
+                batch_no, mfg_date, expiry_date, unit_cost, receipt_id
+         FROM inventory_txns ORDER BY created_at DESC LIMIT 500",
+    )
+    .fetch_all(&s.db)
+    .await?;
     let txns = rows
         .into_iter()
         .map(|r| InventoryTxn {
-            id: r.0,
-            variant_id: r.1,
-            product_id: r.2,
-            txn_type: r.3,
-            qty: r.4,
-            before: r.5,
-            after: r.6,
-            reason: r.7,
-            by: r.8,
-            at: r.9.to_rfc3339(),
+            id: r.id,
+            variant_id: r.variant_id,
+            product_id: r.product_id,
+            txn_type: r.txn_type,
+            qty: r.qty,
+            before: r.before_qty,
+            after: r.after_qty,
+            reason: r.reason,
+            by: r.by_whom,
+            at: r.created_at.to_rfc3339(),
+            batch_no: r.batch_no,
+            mfg_date: r.mfg_date,
+            expiry_date: r.expiry_date,
+            unit_cost: r.unit_cost,
+            receipt_id: r.receipt_id,
         })
         .collect();
     Ok(Json(txns))

@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/orders", get(list).post(place))
         .route("/orders/{number}", get(one))
         .route("/orders/{number}/cancel", post(cancel))
+        .route("/orders/{number}/tracking", get(tracking))
         .route("/payments/razorpay/verify", post(verify))
 }
 
@@ -53,6 +54,11 @@ struct Address {
     landmark: Option<String>,
     #[serde(default)]
     label: Option<String>,
+    /// The delivery pin the customer dropped on the map, if any.
+    #[serde(default)]
+    lat: Option<f64>,
+    #[serde(default)]
+    lng: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +125,15 @@ fn checked_address(a: &Address) -> Result<Value> {
         .as_deref()
         .filter(|l| matches!(*l, "Home" | "Work" | "Other"))
         .unwrap_or("Home");
+    let pin = match (a.lat, a.lng) {
+        (Some(lat), Some(lng))
+            if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lng) =>
+        {
+            Some((lat, lng))
+        }
+        (None, None) => None,
+        _ => return Err(AppError::invalid("Drop the delivery pin again.")),
+    };
     Ok(json!({
         "label": label,
         "name": clean(&a.name, 80, "name")?,
@@ -129,6 +144,8 @@ fn checked_address(a: &Address) -> Result<Value> {
         "city": clean(&a.city, 60, "city")?,
         "pincode": a.pincode.trim(),
         "landmark": optional(&a.landmark, 120, "landmark")?,
+        "lat": pin.map(|p| p.0),
+        "lng": pin.map(|p| p.1),
     }))
 }
 
@@ -392,6 +409,64 @@ async fn cancel(
     Ok(Json(
         orders::view(&mut conn, &number, Some(auth.0.id), false).await?,
     ))
+}
+
+/// A rider position older than this isn't shown (the app was closed or lost signal).
+const FRESH_POSITION_MINUTES: i32 = 10;
+
+type TrackingRow = (
+    String,
+    Value,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<f32>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
+/// Live delivery tracking for the customer's own order: where it's going, and — only while it is
+/// out for delivery — the rider's first name, latest position and the handover code to read out.
+async fn tracking(
+    State(s): State<AppState>,
+    auth: CustomerAuth,
+    Path(number): Path<String>,
+) -> Result<Json<Value>> {
+    let row: Option<TrackingRow> = sqlx::query_as(
+        "SELECT o.status, o.address, o.slot_label, o.delivery_code, r.name, l.lat, l.lng, l.heading, l.at
+           FROM orders o
+           LEFT JOIN riders r ON r.id = o.rider_id AND o.status = 'out-for-delivery'
+           LEFT JOIN rider_locations l ON l.rider_id = r.id AND l.at > now() - ($3::int * interval '1 minute')
+          WHERE o.number = $1 AND o.customer_id = $2",
+    )
+    .bind(&number)
+    .bind(auth.0.id)
+    .bind(FRESH_POSITION_MINUTES)
+    .fetch_optional(&s.db)
+    .await?;
+    let (status, address, slot_label, code, rider_name, lat, lng, heading, at) =
+        row.ok_or(AppError::NotFound)?;
+    let out = status == "out-for-delivery";
+    let drop = match (address["lat"].as_f64(), address["lng"].as_f64()) {
+        (Some(lat), Some(lng)) => json!({ "lat": lat, "lng": lng }),
+        _ => Value::Null,
+    };
+    let rider = rider_name.filter(|_| out).map(|name| {
+        let first = name.split_whitespace().next().unwrap_or("Your rider").to_owned();
+        json!({
+            "name": first,
+            "location": at.map(|at| json!({ "lat": lat, "lng": lng, "heading": heading, "at": at })),
+        })
+    });
+    Ok(Json(json!({
+        "number": number,
+        "status": status,
+        "slot": slot_label,
+        "drop": drop,
+        "rider": rider,
+        "deliveryCode": if out { code } else { None },
+    })))
 }
 
 #[derive(Deserialize)]

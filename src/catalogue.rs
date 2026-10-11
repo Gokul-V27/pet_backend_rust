@@ -305,6 +305,17 @@ pub struct InventoryTxn {
     pub after: i32,
     pub reason: String,
     pub by: String,
+    /// Goods-in only (migration 0010): the batch, its dates and cost, and the receipt it came with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_no: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfg_date: Option<chrono::NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiry_date: Option<chrono::NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_cost: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

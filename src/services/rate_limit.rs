@@ -69,7 +69,7 @@ impl Limits {
         let special = match path {
             "/api/v1/auth/otp/request" => Some(OTP_REQUEST),
             "/api/v1/auth/otp/verify" => Some(OTP_VERIFY),
-            "/api/v1/admin/auth/login" => Some(STAFF_LOGIN),
+            "/api/v1/admin/auth/login" | "/api/v1/rider/auth/login" => Some(STAFF_LOGIN),
             "/api/v1/coupons/validate" => Some(COUPON_CHECK),
             _ => None,
         };

@@ -126,3 +126,56 @@ pretended when there is no SMS provider.
 
 **Sign-in codes:** set `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID` (a DLT-approved template). Without them the server
 refuses to pretend a code was sent (`503 sms_unavailable`) and logs an error at start-up.
+
+## Phone apps and own delivery riders
+
+The Flutter apps in `../app/` use this same API. They send `X-Wagwell-Client: mobile` instead of `web` and sign in with a
+**bearer token** instead of a cookie: the customer app gets its token once, as `token` in the `/auth/otp/verify` response (only
+when it sends the mobile header; the website still gets an HttpOnly cookie and no token), keeps it in the phone's secure storage
+and sends `Authorization: Bearer …`. A browser never attaches that header by itself, so it can't be forged cross-site.
+
+Riders are their own accounts (`riders`, `rider_sessions`; migration `0009`), not staff: a rider can never reach the admin, and only
+ever sees the orders assigned to them.
+
+| | |
+|---|---|
+| `POST /api/v1/rider/auth/login` `{mobile, password}` → `{token, rider}` · `GET /rider/auth/me` · `POST /rider/auth/logout` | 14 h sessions; 5 wrong passwords lock 15 min; same rate limit as staff sign-in |
+| `GET /api/v1/rider/orders` | my stops: packed, shipped or out for delivery, plus today's delivered; address with the checkout map pin, items, `collect` (cash to take, rupees) |
+| `POST /rider/orders/{number}/start` | out for delivery; makes the customer's 4-digit handover code |
+| `POST /rider/orders/{number}/deliver` `{code}` | the code from the customer's app; 5 wrong codes and the shop has to confirm it. Delivered = COD cash booked and the sale posted to the ledger, exactly like staff marking it delivered |
+| `POST /rider/orders/{number}/attempt` `{reason}` | couldn't deliver; noted on the order |
+| `POST /rider/location` `{lat, lng, accuracy?, heading?, speed?}` | latest position only (no history); deleted on sign-out or when the rider is switched off |
+| `GET /api/v1/orders/{number}/tracking` | customer, own order: drop pin, and **only while out for delivery** the rider's first name, a position fresher than 10 min, and the handover code |
+| `GET/POST /api/v1/admin/riders` · `POST /admin/riders/{id}/active` | list (order managers too) · add / switch off (Super Admin, Admin); switching off signs the rider out everywhere |
+| `POST /api/v1/admin/orders/{number}/rider` `{riderId \| null}` | assign a rider (Super Admin, Admin, Order Manager); the admin order view shows `rider` |
+
+First rider (or use the admin endpoint). The password goes in on standard input:
+
+```bash
+read -rs P && echo "$P" | cargo run -- create-rider 9000000001 "Ravi Kumar"
+```
+
+Check the whole delivery chain (local PostgreSQL only, never Supabase):
+
+```bash
+DATABASE_URL=postgres://USER:PASS@localhost:5432/postgres cargo test --test delivery_db -- --ignored
+```
+
+### Staff phone app: scan stock in
+
+The staff app (`../app/admin_app`) signs in at `POST /api/v1/admin/auth/login` with `X-Wagwell-Client: mobile` and gets
+`{token, admin}` back (no cookie). Its session lasts one 12-hour shift with no 30-minute idle limit (the website's sessions keep
+it), because the shop phone has its own screen lock. Migration `0010` adds the session `client` column, goods-in receipts, and
+batch / made-on / expiry / cost on stock log lines.
+
+| | |
+|---|---|
+| `GET /api/v1/admin/barcodes/{code}` | every staff role. `{code, matches: [{product, variant, lastBatch}]}`: exact barcode first, then SKU; an unknown code is an empty list |
+| `POST /api/v1/admin/inventory/receipts` `{type?, supplierRef?, note?, lines: [{variantId, qty, batchNo?, mfgDate?, expiryDate?, unitCost?}]}` | Super Admin, Admin, Inventory Manager. Needs `Idempotency-Key`: the same key returns the first result (`replayed: true`) instead of adding twice; the same key with different items is refused. Up to 200 lines, all or nothing. `type` is `addition` (default), `opening` or `return`; expired batches are refused |
+| `GET /api/v1/admin/inventory/expiring?days=60` | received batches expiring within `days` (1–365) for sizes still in stock, soonest first |
+
+Check it (local PostgreSQL only):
+
+```bash
+DATABASE_URL=postgres://USER:PASS@localhost:5432/postgres cargo test --test admin_app_db -- --ignored
+```

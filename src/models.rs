@@ -42,6 +42,11 @@ impl AdminRole {
         matches!(self, Self::SuperAdmin | Self::Admin | Self::OrderManager)
     }
 
+    /// Adding delivery riders and switching them off.
+    pub fn can_manage_riders(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin)
+    }
+
     /// Sending money back, and the books (journal, P&L, GST).
     pub fn can_handle_money(self) -> bool {
         matches!(self, Self::SuperAdmin | Self::Admin)

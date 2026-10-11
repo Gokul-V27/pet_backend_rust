@@ -1,12 +1,17 @@
 //! Staff sign-in: email + password (Argon2id). Five wrong passwords lock the account for 15
 //! minutes. Wrong email and wrong password give the same answer and take the same time. Every
 //! sign-in, failure and sign-out goes in the audit log. (Two-step codes are the next addition.)
+//!
+//! The admin website gets an HttpOnly cookie. The staff phone app (which sends
+//! `X-Wagwell-Client: mobile`) gets the same kind of token once, as `token` in the body, to keep in
+//! the phone's secure storage and send back as `Authorization: Bearer …`; its session lasts a shift.
 
 use std::str::FromStr;
 
 use axum::{
     Json, Router,
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -14,10 +19,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::auth::{ADMIN_COOKIE, ADMIN_SESSION_HOURS, AdminAuth, clear_cookie, session_cookie};
+use crate::auth::{
+    ADMIN_COOKIE, ADMIN_MOBILE_SESSION_HOURS, ADMIN_SESSION_HOURS, AdminAuth, clear_cookie,
+    session_cookie,
+};
 use crate::error::{AppError, Result};
 use crate::models::AdminRole;
 use crate::repo::audit;
+use crate::routes::security::is_mobile;
 use crate::services::{password, token};
 use crate::state::AppState;
 
@@ -42,8 +51,10 @@ type AdminRow = (Uuid, String, String, String, String, i32, bool, bool);
 async fn login(
     State(s): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Json(req): Json<Login>,
 ) -> Result<(CookieJar, Json<Value>)> {
+    let mobile_app = is_mobile(&headers);
     let email = req.email.trim().to_lowercase();
     if email.is_empty() || email.len() > 254 || req.password.is_empty() || req.password.len() > 256
     {
@@ -124,25 +135,41 @@ async fn login(
     let (cookie_token, token_hash) = token::new_token()?;
     let mut tx = s.db.begin().await?;
     sqlx::query("UPDATE admin_users SET failed_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO admin_sessions (admin_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3::int * interval '1 hour'))")
+    let (client, hours) = if mobile_app {
+        ("mobile", ADMIN_MOBILE_SESSION_HOURS)
+    } else {
+        ("web", ADMIN_SESSION_HOURS)
+    };
+    sqlx::query("INSERT INTO admin_sessions (admin_id, token_hash, expires_at, client) VALUES ($1, $2, now() + ($3::int * interval '1 hour'), $4)")
         .bind(id)
         .bind(token_hash)
-        .bind(ADMIN_SESSION_HOURS as i32)
+        .bind(hours as i32)
+        .bind(client)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
 
-    audit::record(&s.db, "admin", Some(id), "admin.login", None, json!({})).await;
+    audit::record(
+        &s.db,
+        "admin",
+        Some(id),
+        "admin.login",
+        None,
+        json!({ "client": client }),
+    )
+    .await;
+    let me = json!({ "id": id, "email": db_email, "name": name, "role": role });
+    if mobile_app {
+        // The phone keeps the token; no cookie is set.
+        return Ok((jar, Json(json!({ "token": cookie_token, "admin": me }))));
+    }
     let jar = jar.add(session_cookie(
         ADMIN_COOKIE,
         cookie_token,
         s.cfg.cookie_secure(),
         time::Duration::hours(ADMIN_SESSION_HOURS),
     ));
-    Ok((
-        jar,
-        Json(json!({ "id": id, "email": db_email, "name": name, "role": role })),
-    ))
+    Ok((jar, Json(me)))
 }
 
 async fn me(admin: AdminAuth) -> Json<AdminAuth> {

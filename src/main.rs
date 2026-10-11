@@ -38,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("create-admin") {
         return create_admin(&db, &args[1..]).await;
     }
+    if args.first().map(String::as_str) == Some("create-rider") {
+        return create_rider(&db, &args[1..]).await;
+    }
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
@@ -103,8 +106,8 @@ async fn main() -> anyhow::Result<()> {
         listener,
         wagwell_api::app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -143,6 +146,36 @@ async fn create_admin(db: &sqlx::PgPool, args: &[String]) -> anyhow::Result<()> 
         email.trim().to_lowercase(),
         role.as_str()
     );
+    Ok(())
+}
+
+/// `wagwell-api create-rider <mobile> "<full name>"`, with the password on standard input.
+/// Riders sign in to the delivery app with this mobile number and password.
+async fn create_rider(db: &sqlx::PgPool, args: &[String]) -> anyhow::Result<()> {
+    let [mobile, name] = args else {
+        bail!("usage: create-rider <10-digit mobile> \"<full name>\"   (password on stdin)");
+    };
+    let mobile = mobile.trim();
+    if !wagwell_api::services::otp::valid_mobile(mobile) {
+        bail!("\"{mobile}\" isn't a 10-digit Indian mobile number");
+    }
+    if name.trim().is_empty() {
+        bail!("give the rider's real name");
+    }
+    let mut pw = String::new();
+    std::io::stdin().lock().read_line(&mut pw)?;
+    let pw = pw.trim_end_matches(['\n', '\r']);
+    password::check_strength(pw).map_err(|m| anyhow::anyhow!("password: {m}"))?;
+    let id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO riders (mobile, name, password_hash) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(mobile)
+    .bind(name.trim())
+    .bind(password::hash(pw)?)
+    .fetch_one(db)
+    .await
+    .context("could not create the rider (is the mobile number already used?)")?;
+    println!("created rider {mobile} with id {id}");
     Ok(())
 }
 

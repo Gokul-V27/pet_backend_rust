@@ -1351,6 +1351,9 @@ pub struct OrderView {
     /// Present while an online payment is waiting: what the browser needs to open Razorpay Checkout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub razorpay: Option<Value>,
+    /// Only for the admin: the delivery rider carrying it, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rider: Option<Value>,
 }
 
 #[derive(FromRow)]
@@ -1457,6 +1460,17 @@ pub async fn view(
     } else {
         None
     };
+    let rider = if with_customer {
+        let r: Option<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT r.id, r.name, r.mobile FROM riders r JOIN orders o ON o.rider_id = r.id WHERE o.id = $1",
+        )
+        .bind(row.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        r.map(|(id, name, mobile)| serde_json::json!({ "id": id, "name": name, "mobile": mobile }))
+    } else {
+        None
+    };
     let item_count = lines.iter().map(|l| i64::from(l.qty)).sum();
     let payment_id: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT gateway_payment_id FROM payments WHERE order_id = $1 AND gateway_payment_id IS NOT NULL ORDER BY created_at LIMIT 1",
@@ -1521,6 +1535,7 @@ pub async fn view(
         payment_id: payment_id.and_then(|(p,)| p),
         customer,
         razorpay,
+        rider,
     })
 }
 

@@ -5,6 +5,7 @@
 use axum::{
     Json, Router,
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -14,10 +15,12 @@ use uuid::Uuid;
 
 use crate::auth::{
     CUSTOMER_COOKIE, CUSTOMER_SESSION_DAYS, CustomerAuth, clear_cookie, session_cookie,
+    session_token,
 };
 use crate::error::{AppError, Result};
 use crate::models::Customer;
 use crate::repo::audit;
+use crate::routes::security::is_mobile;
 use crate::services::{otp, token};
 use crate::state::AppState;
 
@@ -119,11 +122,15 @@ fn clean_name(raw: Option<&str>) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Signs the customer in. The website gets an HttpOnly cookie; the phone app (which sends
+/// `X-Wagwell-Client: mobile`) gets the same token once, as `token` in the body, to keep in the
+/// phone's secure storage and send back as `Authorization: Bearer …`.
 async fn verify_code(
     State(s): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Json(req): Json<VerifyCode>,
-) -> Result<(CookieJar, Json<Customer>)> {
+) -> Result<(CookieJar, Json<Value>)> {
     let mobile = req.mobile.trim().to_owned();
     let code = req.code.trim().to_owned();
     if !otp::valid_mobile(&mobile) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
@@ -188,23 +195,32 @@ async fn verify_code(
         json!({}),
     )
     .await;
+    let mut body = serde_json::to_value(&customer).map_err(anyhow::Error::from)?;
+    if is_mobile(&headers) {
+        body["token"] = Value::String(cookie_token);
+        return Ok((jar, Json(body)));
+    }
     let jar = jar.add(session_cookie(
         CUSTOMER_COOKIE,
         cookie_token,
         s.cfg.cookie_secure(),
         time::Duration::days(CUSTOMER_SESSION_DAYS),
     ));
-    Ok((jar, Json(customer)))
+    Ok((jar, Json(body)))
 }
 
 async fn me(CustomerAuth(customer): CustomerAuth) -> Json<Customer> {
     Json(customer)
 }
 
-async fn logout(State(s): State<AppState>, jar: CookieJar) -> Result<(CookieJar, Json<Value>)> {
-    if let Some(c) = jar.get(CUSTOMER_COOKIE) {
+async fn logout(
+    State(s): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<(CookieJar, Json<Value>)> {
+    if let Some(t) = session_token(&headers, CUSTOMER_COOKIE) {
         sqlx::query("UPDATE customer_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL")
-            .bind(token::hash_token(c.value()))
+            .bind(token::hash_token(&t))
             .execute(&s.db)
             .await?;
     }

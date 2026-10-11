@@ -226,3 +226,75 @@ fn each_role_may_change_only_what_the_admin_table_says() {
     assert_eq!(who(|r| r.can_edit_messages()), [SuperAdmin, Admin, Support]);
     assert_eq!(who(|r| r.can_view_audit()), [SuperAdmin]);
 }
+
+/* ───────────── Phone apps and delivery riders ───────────── */
+
+fn mobile_post(path: &str, body: serde_json::Value) -> Request<axum::body::Body> {
+    Request::post(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-wagwell-client", "mobile")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_phone_apps_client_header_is_accepted_and_others_are_not() {
+    let app = router(lazy_pool());
+    // Passes the guard and fails validation (400), never the guard (403).
+    let res = send(
+        &app,
+        mobile_post("/api/v1/auth/otp/request", json!({ "mobile": "12345" })),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let mut req = mobile_post(
+        "/api/v1/auth/otp/request",
+        json!({ "mobile": "9876543210" }),
+    );
+    req.headers_mut()
+        .insert("x-wagwell-client", "curl".parse().unwrap());
+    assert_eq!(send(&app, req).await.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn rider_and_tracking_routes_need_a_session() {
+    let app = router(lazy_pool());
+    for path in [
+        "/api/v1/rider/auth/me",
+        "/api/v1/rider/orders",
+        "/api/v1/orders/WG100001/tracking",
+        "/api/v1/admin/riders",
+    ] {
+        let res = send(&app, get(path)).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+    // A malformed bearer token never reaches the database.
+    let mut req = get("/api/v1/rider/orders");
+    req.headers_mut()
+        .insert(header::AUTHORIZATION, "Bearer not-a-token".parse().unwrap());
+    assert_eq!(send(&app, req).await.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn rider_login_rejects_bad_input_without_a_database() {
+    let app = router(lazy_pool());
+    let res = send(
+        &app,
+        mobile_post(
+            "/api/v1/rider/auth/login",
+            json!({ "mobile": "123", "password": "x" }),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json(res).await["error"]["code"], "invalid_credentials");
+}
+
+#[test]
+fn only_owners_manage_rider_accounts() {
+    use wagwell_api::models::AdminRole::*;
+    let all = [SuperAdmin, Admin, OrderManager, InventoryManager, Support];
+    let who: Vec<_> = all.into_iter().filter(|r| r.can_manage_riders()).collect();
+    assert_eq!(who, [SuperAdmin, Admin]);
+}

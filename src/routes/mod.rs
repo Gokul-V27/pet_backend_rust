@@ -6,14 +6,17 @@ use crate::state::AppState;
 
 pub mod admin_auth;
 pub mod admin_catalogue;
+pub mod admin_delivery;
 pub mod admin_images;
 pub mod admin_insights;
 pub mod admin_orders;
+pub mod admin_scan;
 pub mod customer_auth;
 pub mod health;
 pub mod orders;
 pub mod public_catalogue;
-mod security;
+pub mod rider;
+pub mod security;
 pub mod webhooks;
 
 /// Header every changing request must carry (see security.rs).
@@ -29,12 +32,15 @@ pub fn api(state: &AppState) -> Router<AppState> {
             cache::serve_public_from_cache,
         )))
         .merge(orders::routes())
+        .merge(rider::routes())
         .nest(
             "/admin",
             admin_auth::routes()
                 .merge(admin_images::routes())
                 .merge(admin_catalogue::routes())
                 .merge(admin_orders::routes())
+                .merge(admin_delivery::routes())
+                .merge(admin_scan::routes())
                 .merge(admin_insights::routes())
                 // A staff change (product, price, offer, stock, order) clears the cached catalogue.
                 .layer(middleware::from_fn_with_state(

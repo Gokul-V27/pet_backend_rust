@@ -1,5 +1,8 @@
 //! Staff: the delivery riders (add, switch off, see where they are) and which rider carries an order.
 //! Order managers assign riders; only Super Admin and Admin add or switch off rider accounts.
+//!
+//! Staff never choose a rider's password: adding a rider (or "new setup code") gives a one-time code,
+//! valid for a day, that the rider types into the Delivery app with a password of their own.
 
 use axum::{
     Json, Router,
@@ -13,13 +16,14 @@ use uuid::Uuid;
 use crate::auth::AdminAuth;
 use crate::error::{AppError, Result};
 use crate::repo::audit;
-use crate::services::{otp, password};
+use crate::services::{otp, password, token, totp};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/riders", get(list).post(create))
         .route("/riders/{id}/active", post(set_active))
+        .route("/riders/{id}/setup-code", post(new_setup_code))
         .route("/orders/{number}/rider", post(assign))
 }
 
@@ -67,7 +71,36 @@ async fn list(State(s): State<AppState>, admin: AdminAuth) -> Result<Json<Vec<Va
 struct NewRider {
     mobile: String,
     name: String,
-    password: String,
+    /// Only for scripts and tests. Staff screens leave it out and hand the rider a setup code.
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// How long a rider's setup code works.
+const SETUP_CODE_HOURS: i32 = 24;
+
+/// A fresh one-time setup code for the rider (earlier unused ones stop working). Returned once.
+async fn issue_setup_code(
+    conn: &mut sqlx::PgConnection,
+    rider_id: Uuid,
+) -> Result<(String, chrono::DateTime<chrono::Utc>)> {
+    sqlx::query(
+        "UPDATE rider_setup_codes SET used_at = now() WHERE rider_id = $1 AND used_at IS NULL",
+    )
+    .bind(rider_id)
+    .execute(&mut *conn)
+    .await?;
+    let code = totp::readable_code(8)?;
+    let expires: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO rider_setup_codes (rider_id, code_hash, expires_at)
+         VALUES ($1, $2, now() + ($3::int * interval '1 hour')) RETURNING expires_at",
+    )
+    .bind(rider_id)
+    .bind(totp::hash_code("rider-setup", &code))
+    .bind(SETUP_CODE_HOURS)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok((code, expires))
 }
 
 async fn create(
@@ -94,11 +127,19 @@ async fn create(
     if name.is_empty() {
         return Err(AppError::invalid("Enter the rider's name."));
     }
-    password::check_strength(&req.password).map_err(AppError::invalid)?;
-    let pw = req.password;
+    // No password from staff: a long random one nobody knows, until the rider sets their own.
+    let use_setup_code = req.password.is_none();
+    let pw = match req.password {
+        Some(p) => {
+            password::check_strength(&p).map_err(AppError::invalid)?;
+            p
+        }
+        None => token::new_token()?.0,
+    };
     let hash = tokio::task::spawn_blocking(move || password::hash(&pw))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("hashing failed: {e}")))??;
+    let mut tx = s.db.begin().await?;
     let id: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO riders (mobile, name, password_hash) VALUES ($1, $2, $3)
          ON CONFLICT (mobile) DO NOTHING RETURNING id",
@@ -106,10 +147,16 @@ async fn create(
     .bind(mobile)
     .bind(&name)
     .bind(hash)
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let id =
         id.ok_or_else(|| AppError::invalid("A rider with that mobile number already exists."))?;
+    let setup = if use_setup_code {
+        Some(issue_setup_code(&mut tx, id).await?)
+    } else {
+        None
+    };
+    tx.commit().await?;
     audit::record(
         &s.db,
         "admin",
@@ -119,8 +166,49 @@ async fn create(
         json!({ "mobile": mobile }),
     )
     .await;
+    let mut body = json!({ "id": id, "mobile": mobile, "name": name, "active": true });
+    if let Some((code, expires)) = setup {
+        body["setupCode"] = json!(code);
+        body["setupCodeExpiresAt"] = json!(expires);
+    }
+    Ok(Json(body))
+}
+
+/// A new one-time setup code for a rider: their first sign-in on a new phone, or a forgotten
+/// password. Earlier codes stop working; the rider's current password keeps working until they
+/// use the code.
+async fn new_setup_code(
+    State(s): State<AppState>,
+    admin: AdminAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    if !admin.role.can_manage_riders() {
+        return Err(AppError::Forbidden);
+    }
+    let mut tx = s.db.begin().await?;
+    let active: Option<bool> =
+        sqlx::query_scalar("SELECT active FROM riders WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    match active {
+        None => return Err(AppError::NotFound),
+        Some(false) => return Err(AppError::invalid("Switch the rider back on first.")),
+        Some(true) => {}
+    }
+    let (code, expires) = issue_setup_code(&mut tx, id).await?;
+    tx.commit().await?;
+    audit::record(
+        &s.db,
+        "admin",
+        Some(admin.id),
+        "rider.setup_code",
+        Some(&id.to_string()),
+        json!({}),
+    )
+    .await;
     Ok(Json(
-        json!({ "id": id, "mobile": mobile, "name": name, "active": true }),
+        json!({ "id": id, "setupCode": code, "setupCodeExpiresAt": expires }),
     ))
 }
 

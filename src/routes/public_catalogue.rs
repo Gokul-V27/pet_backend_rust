@@ -64,8 +64,7 @@ async fn list_active_products(State(s): State<AppState>) -> Result<Json<Vec<Prod
     )
     .fetch_all(&s.db)
     .await?;
-    let created_map: std::collections::HashMap<String, String> =
-        created_ats.into_iter().collect();
+    let created_map: std::collections::HashMap<String, String> = created_ats.into_iter().collect();
 
     let mut variant_map: std::collections::HashMap<String, Vec<Variant>> =
         std::collections::HashMap::new();
@@ -118,12 +117,11 @@ async fn get_active_product(
     .map(Variant::from)
     .collect();
 
-    let ca: (String,) = sqlx::query_as(
-        "SELECT to_char(created_at, 'YYYY-MM-DD') FROM products WHERE id = $1",
-    )
-    .bind(&row.id)
-    .fetch_one(&s.db)
-    .await?;
+    let ca: (String,) =
+        sqlx::query_as("SELECT to_char(created_at, 'YYYY-MM-DD') FROM products WHERE id = $1")
+            .bind(&row.id)
+            .fetch_one(&s.db)
+            .await?;
 
     Ok(Json(row.into_product(variants, ca.0)))
 }

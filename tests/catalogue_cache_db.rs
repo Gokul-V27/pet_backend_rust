@@ -56,7 +56,10 @@ async fn shopper(app: &Router, pool: &PgPool) -> String {
         .unwrap();
     let res = send(
         app,
-        post_json("/api/v1/auth/otp/verify", json!({ "mobile": mobile, "code": "123456" })),
+        post_json(
+            "/api/v1/auth/otp/verify",
+            json!({ "mobile": mobile, "code": "123456" }),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -70,7 +73,11 @@ async fn a_repeat_request_is_served_from_memory_even_without_the_database(pool: 
     let first = send(&app, get("/api/v1/categories")).await;
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(x_cache(&first).as_deref(), Some("MISS"));
-    assert!(cache_control(&first).starts_with("public, max-age=10"), "{}", cache_control(&first));
+    assert!(
+        cache_control(&first).starts_with("public, max-age=10"),
+        "{}",
+        cache_control(&first)
+    );
     let body = json(first).await;
     assert!(body.as_array().is_some_and(|a| !a.is_empty()));
 
@@ -88,7 +95,11 @@ async fn each_address_is_cached_separately(pool: PgPool) {
     let list = json(send(&app, get("/api/v1/products")).await).await;
     let slug = list[0]["slug"].as_str().unwrap().to_owned();
     let one = send(&app, get(&format!("/api/v1/products/{slug}"))).await;
-    assert_eq!(x_cache(&one).as_deref(), Some("MISS"), "a product page is not the product list");
+    assert_eq!(
+        x_cache(&one).as_deref(),
+        Some("MISS"),
+        "a product page is not the product list"
+    );
     assert_eq!(json(one).await["slug"], slug.as_str());
     let again = send(&app, get(&format!("/api/v1/products/{slug}"))).await;
     assert_eq!(x_cache(&again).as_deref(), Some("HIT"));
@@ -100,12 +111,20 @@ async fn a_staff_change_shows_up_at_once(pool: PgPool) {
     let app = router(pool.clone());
     let boss = staff(&app, &pool).await;
     let label = |cats: &Value| {
-        cats.as_array().unwrap().iter().find(|c| c["slug"] == "dry-food").unwrap()["label"].clone()
+        cats.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["slug"] == "dry-food")
+            .unwrap()["label"]
+            .clone()
     };
 
     let before = json(send(&app, get("/api/v1/categories")).await).await;
     assert_ne!(label(&before), "Kibble");
-    assert_eq!(x_cache(&send(&app, get("/api/v1/categories")).await).as_deref(), Some("HIT"));
+    assert_eq!(
+        x_cache(&send(&app, get("/api/v1/categories")).await).as_deref(),
+        Some("HIT")
+    );
 
     let edit = Request::builder()
         .method(Method::PUT)
@@ -113,12 +132,18 @@ async fn a_staff_change_shows_up_at_once(pool: PgPool) {
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-wagwell-client", "web")
         .header(header::COOKIE, &boss)
-        .body(Body::from(json!({ "slug": "dry-food", "label": "Kibble", "active": true, "sort": 1 }).to_string()))
+        .body(Body::from(
+            json!({ "slug": "dry-food", "label": "Kibble", "active": true, "sort": 1 }).to_string(),
+        ))
         .unwrap();
     assert_eq!(send(&app, edit).await.status(), StatusCode::OK);
 
     let after = send(&app, get("/api/v1/categories")).await;
-    assert_eq!(x_cache(&after).as_deref(), Some("MISS"), "the staff change must clear the cache");
+    assert_eq!(
+        x_cache(&after).as_deref(),
+        Some("MISS"),
+        "the staff change must clear the cache"
+    );
     assert_eq!(label(&json(after).await), "Kibble");
 }
 
@@ -133,10 +158,15 @@ async fn a_refused_staff_change_keeps_the_cache(pool: PgPool) {
         .uri("/api/v1/admin/categories/dry-food")
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-wagwell-client", "web")
-        .body(Body::from(json!({ "slug": "dry-food", "label": "Hacked" }).to_string()))
+        .body(Body::from(
+            json!({ "slug": "dry-food", "label": "Hacked" }).to_string(),
+        ))
         .unwrap();
     assert_eq!(send(&app, edit).await.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(x_cache(&send(&app, get("/api/v1/categories")).await).as_deref(), Some("HIT"));
+    assert_eq!(
+        x_cache(&send(&app, get("/api/v1/categories")).await).as_deref(),
+        Some("HIT")
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -149,8 +179,14 @@ async fn many_shoppers_at_once_cause_a_single_database_load(pool: PgPool) {
     }))
     .await;
     assert!(all.iter().all(|r| r.status() == StatusCode::OK));
-    let misses = all.iter().filter(|r| x_cache(r).as_deref() == Some("MISS")).count();
-    assert_eq!(misses, 1, "only the first request should reach the database");
+    let misses = all
+        .iter()
+        .filter(|r| x_cache(r).as_deref() == Some("MISS"))
+        .count();
+    assert_eq!(
+        misses, 1,
+        "only the first request should reach the database"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -179,7 +215,11 @@ async fn personal_answers_are_never_cached(pool: PgPool) {
         }
     }
     // Coupon checks are POSTs and depend on the input: never cached either.
-    let res = send(&app, post_json("/api/v1/coupons/validate", json!({ "code": "NOPE" }))).await;
+    let res = send(
+        &app,
+        post_json("/api/v1/coupons/validate", json!({ "code": "NOPE" })),
+    )
+    .await;
     assert_eq!(x_cache(&res), None);
 }
 

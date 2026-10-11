@@ -4,6 +4,9 @@
 //!
 //! A rider only ever sees orders assigned to them, and only what's needed at the door: the
 //! address, the delivery name and phone, the items and any cash to collect.
+//!
+//! A rider sets their own password with a one-time setup code the shop gives them
+//! (`POST /rider/auth/setup`), so nobody else ever knows it. The same works as a password reset.
 
 use axum::{
     Json, Router,
@@ -18,17 +21,20 @@ use uuid::Uuid;
 use crate::auth::{RIDER_SESSION_HOURS, RiderAuth};
 use crate::error::{AppError, Result};
 use crate::repo::audit;
-use crate::services::{orders, otp, password, token};
+use crate::services::{orders, otp, password, token, totp};
 use crate::state::AppState;
 
 const MAX_FAILED_LOGINS: i32 = 5;
 const LOCK_MINUTES: i32 = 15;
 /// Wrong handover codes allowed per delivery before the shop has to confirm it.
 pub const MAX_CODE_ATTEMPTS: i32 = 5;
+/// Wrong tries allowed on one setup code before the shop has to issue a new one.
+pub const MAX_SETUP_ATTEMPTS: i32 = 5;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/rider/auth/login", post(login))
+        .route("/rider/auth/setup", post(setup))
         .route("/rider/auth/me", get(me))
         .route("/rider/auth/logout", post(logout))
         .route("/rider/orders", get(list))
@@ -102,6 +108,17 @@ async fn login(State(s): State<AppState>, Json(req): Json<Login>) -> Result<Json
         return Err(AppError::InvalidCredentials);
     }
 
+    start_session(&s, id, &mobile, &name, "password").await
+}
+
+/// Signs the rider in on this phone: the token goes back once, in the body.
+async fn start_session(
+    s: &AppState,
+    id: Uuid,
+    mobile: &str,
+    name: &str,
+    via: &str,
+) -> Result<Json<Value>> {
     let (session_token, token_hash) = token::new_token()?;
     let mut tx = s.db.begin().await?;
     sqlx::query("UPDATE riders SET failed_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1")
@@ -115,13 +132,105 @@ async fn login(State(s): State<AppState>, Json(req): Json<Login>) -> Result<Json
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    audit::record(&s.db, "rider", Some(id), "rider.login", None, json!({})).await;
+    audit::record(
+        &s.db,
+        "rider",
+        Some(id),
+        "rider.login",
+        None,
+        json!({ "via": via }),
+    )
+    .await;
 
     Ok(Json(json!({
         "token": session_token,
         "rider": { "id": id, "mobile": mobile, "name": name },
         "expiresInHours": RIDER_SESSION_HOURS,
     })))
+}
+
+#[derive(Deserialize)]
+struct Setup {
+    mobile: String,
+    code: String,
+    password: String,
+}
+
+/// The rider's first sign-in, or a reset: the one-time code from the shop plus a password of the
+/// rider's own choosing. Ends any other sessions and signs this phone in.
+async fn setup(State(s): State<AppState>, Json(req): Json<Setup>) -> Result<Json<Value>> {
+    let mobile = req.mobile.trim().to_owned();
+    if !otp::valid_mobile(&mobile) || req.code.len() > 20 {
+        return Err(AppError::OtpInvalid);
+    }
+    password::check_strength(&req.password).map_err(AppError::invalid)?;
+
+    let mut tx = s.db.begin().await?;
+    let row: Option<(Uuid, String, i32, Uuid, String, bool)> = sqlx::query_as(
+        "SELECT c.id, c.code_hash, c.attempts, r.id, r.name, r.active
+           FROM rider_setup_codes c JOIN riders r ON r.id = c.rider_id
+          WHERE r.mobile = $1 AND c.used_at IS NULL AND c.expires_at > now()
+          ORDER BY c.created_at DESC LIMIT 1 FOR UPDATE OF c",
+    )
+    .bind(&mobile)
+    .fetch_optional(&mut *tx)
+    .await?;
+    // One answer for "no such rider", "no code", "used up" and "wrong code".
+    let Some((code_id, code_hash, attempts, rider_id, name, active)) = row else {
+        return Err(AppError::OtpInvalid);
+    };
+    if attempts >= MAX_SETUP_ATTEMPTS || !active {
+        return Err(AppError::OtpInvalid);
+    }
+    sqlx::query("UPDATE rider_setup_codes SET attempts = attempts + 1 WHERE id = $1")
+        .bind(code_id)
+        .execute(&mut *tx)
+        .await?;
+    let typed = totp::hash_code("rider-setup", &req.code);
+    if !bool::from(typed.as_bytes().ct_eq(code_hash.as_bytes())) {
+        tx.commit().await?; // keep the spent try
+        audit::record(
+            &s.db,
+            "rider",
+            Some(rider_id),
+            "rider.setup_failed",
+            None,
+            json!({}),
+        )
+        .await;
+        return Err(AppError::OtpInvalid);
+    }
+    let pw = req.password;
+    let hash = tokio::task::spawn_blocking(move || password::hash(&pw))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("hashing failed: {e}")))??;
+    sqlx::query("UPDATE riders SET password_hash = $2, failed_attempts = 0, locked_until = NULL WHERE id = $1")
+        .bind(rider_id)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE rider_setup_codes SET used_at = now() WHERE id = $1")
+        .bind(code_id)
+        .execute(&mut *tx)
+        .await?;
+    // A reset signs out every other phone.
+    sqlx::query(
+        "UPDATE rider_sessions SET revoked_at = now() WHERE rider_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(rider_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    audit::record(
+        &s.db,
+        "rider",
+        Some(rider_id),
+        "rider.password_set",
+        None,
+        json!({}),
+    )
+    .await;
+    start_session(&s, rider_id, &mobile, &name, "setup_code").await
 }
 
 async fn me(rider: RiderAuth) -> Json<RiderAuth> {

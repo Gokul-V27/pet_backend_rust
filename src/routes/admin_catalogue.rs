@@ -182,11 +182,12 @@ async fn update_product(
     upsert_product(&s, &admin, p).await
 }
 
-async fn upsert_product(s: &AppState, admin: &AdminAuth, p: Product) -> Result<Json<Product>> {
+async fn upsert_product(s: &AppState, admin: &AdminAuth, mut p: Product) -> Result<Json<Product>> {
     allow(admin.role.can_edit_catalogue())?;
     if p.id.is_empty() || p.slug.is_empty() || p.name.is_empty() {
         return Err(AppError::invalid("id, slug and name are required"));
     }
+    check_barcodes(s, &mut p).await?;
 
     let grain_free = p.grain_free.unwrap_or(false);
 
@@ -246,6 +247,52 @@ async fn upsert_product(s: &AppState, admin: &AdminAuth, p: Product) -> Result<J
 
     audit(s, admin, "save_product", &p.id).await;
     get_product(State(s.clone()), admin.clone(), Path(p.id)).await
+}
+
+/// One barcode, one product size: a scan must find exactly one pack. Blank barcodes mean "none".
+async fn check_barcodes(s: &AppState, p: &mut Product) -> Result<()> {
+    for v in &mut p.variants {
+        v.barcode = v
+            .barcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned);
+        if let Some(b) = &v.barcode
+            && !crate::routes::admin_scan::valid_code(b)
+        {
+            return Err(AppError::invalid(format!(
+                "The barcode of {} has characters a scanner can't read.",
+                v.size
+            )));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for v in &p.variants {
+        if let Some(b) = &v.barcode
+            && !seen.insert(b.clone())
+        {
+            return Err(AppError::invalid(format!(
+                "Barcode {b} is on two sizes of this product."
+            )));
+        }
+    }
+    let codes: Vec<String> = seen.into_iter().collect();
+    let ids: Vec<String> = p.variants.iter().map(|v| v.id.clone()).collect();
+    let clash: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT v.barcode, pr.name, v.size FROM variants v JOIN products pr ON pr.id = v.product_id
+          WHERE v.barcode = ANY($1) AND NOT (v.id = ANY($2)) LIMIT 1",
+    )
+    .bind(&codes)
+    .bind(&ids)
+    .fetch_optional(&s.db)
+    .await?;
+    if let Some((code, name, size)) = clash {
+        return Err(AppError::invalid(format!(
+            "Barcode {code} already belongs to {name} · {size}."
+        )));
+    }
+    Ok(())
 }
 
 // ═════════════════════════ Reviews ═════════════════════════
@@ -520,10 +567,14 @@ async fn adjust_stock(
     // Either a change (+/-) or, for a stock count, the number actually on the shelf.
     match input.counted {
         Some(n) if !(0..=1_000_000).contains(&n) => {
-            return Err(AppError::invalid("a stock count must be between 0 and 1000000"));
+            return Err(AppError::invalid(
+                "a stock count must be between 0 and 1000000",
+            ));
         }
         None if input.qty == 0 || input.qty.abs() > 100_000 => {
-            return Err(AppError::invalid("quantity must be between -100000 and 100000, not zero"));
+            return Err(AppError::invalid(
+                "quantity must be between -100000 and 100000, not zero",
+            ));
         }
         _ => {}
     }
@@ -750,7 +801,16 @@ async fn save_settings(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     allow(admin.role.can_run_marketing())?;
-    const KEYS: [&str; 8] = ["donation", "referral", "share", "themes", "loader", "supplementIds", "urgentDays", "chatbot"];
+    const KEYS: [&str; 8] = [
+        "donation",
+        "referral",
+        "share",
+        "themes",
+        "loader",
+        "supplementIds",
+        "urgentDays",
+        "chatbot",
+    ];
     let Value::Object(map) = &body else {
         return Err(AppError::invalid("settings must be an object"));
     };
@@ -776,7 +836,15 @@ async fn save_settings(
 // ═════════════════════════ Audit log ═════════════════════════
 
 /// `(id, at, actor type or role, actor id, action, target, detail)`.
-type AuditRow = (i64, chrono::DateTime<chrono::Utc>, String, Option<uuid::Uuid>, String, Option<String>, Value);
+type AuditRow = (
+    i64,
+    chrono::DateTime<chrono::Utc>,
+    String,
+    Option<uuid::Uuid>,
+    String,
+    Option<String>,
+    Value,
+);
 
 async fn list_audit(State(s): State<AppState>, admin: AdminAuth) -> Result<Json<Vec<Value>>> {
     allow(admin.role.can_view_audit())?;

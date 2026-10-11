@@ -27,7 +27,10 @@ fn minimum_length_is_twelve() {
 
 #[test]
 fn eleven_characters_are_refused_and_twelve_accepted() {
-    assert_eq!(check_strength(&"a".repeat(11)), Err("use at least 12 characters"));
+    assert_eq!(
+        check_strength(&"a".repeat(11)),
+        Err("use at least 12 characters")
+    );
     assert!(check_strength(&"a".repeat(12)).is_ok());
 }
 
@@ -44,7 +47,10 @@ fn empty_password_is_refused() {
 #[test]
 fn up_to_128_characters_are_allowed_and_129_refused() {
     assert!(check_strength(&"x".repeat(128)).is_ok());
-    assert_eq!(check_strength(&"x".repeat(129)), Err("use at most 128 characters"));
+    assert_eq!(
+        check_strength(&"x".repeat(129)),
+        Err("use at most 128 characters")
+    );
 }
 
 #[test]
@@ -121,7 +127,12 @@ fn the_same_password_hashes_differently_each_time() {
 fn only_the_exact_password_verifies() {
     let h = hash("Correct-Horse-12").unwrap();
     assert!(verify("Correct-Horse-12", &h));
-    for wrong in ["correct-horse-12", "Correct-Horse-12 ", "Correct-Horse-1", ""] {
+    for wrong in [
+        "correct-horse-12",
+        "Correct-Horse-12 ",
+        "Correct-Horse-1",
+        "",
+    ] {
         assert!(!verify(wrong, &h), "{wrong:?}");
     }
 }
@@ -154,7 +165,15 @@ fn every_role_round_trips_through_its_name() {
 
 #[test]
 fn role_names_are_exact() {
-    for bad in ["Super_Admin", "SUPER_ADMIN", "superadmin", "super admin", " admin", "owner", ""] {
+    for bad in [
+        "Super_Admin",
+        "SUPER_ADMIN",
+        "superadmin",
+        "super admin",
+        " admin",
+        "owner",
+        "",
+    ] {
         assert!(AdminRole::from_str(bad).is_err(), "{bad:?}");
     }
 }
@@ -182,7 +201,10 @@ fn everyone_can_view_orders_but_only_order_staff_can_move_them() {
         assert!(r.can_view_orders(), "{r:?}");
         assert_eq!(
             r.can_manage_orders(),
-            matches!(r, AdminRole::SuperAdmin | AdminRole::Admin | AdminRole::OrderManager),
+            matches!(
+                r,
+                AdminRole::SuperAdmin | AdminRole::Admin | AdminRole::OrderManager
+            ),
             "{r:?}"
         );
     }
@@ -191,7 +213,10 @@ fn everyone_can_view_orders_but_only_order_staff_can_move_them() {
 #[test]
 fn stock_and_catalogue_management_include_inventory_managers() {
     for r in ROLES {
-        let inv = matches!(r, AdminRole::SuperAdmin | AdminRole::Admin | AdminRole::InventoryManager);
+        let inv = matches!(
+            r,
+            AdminRole::SuperAdmin | AdminRole::Admin | AdminRole::InventoryManager
+        );
         assert_eq!(r.can_adjust_stock(), inv, "{r:?} stock");
         assert_eq!(r.can_manage_catalogue(), inv, "{r:?} catalogue");
     }
@@ -220,7 +245,12 @@ fn run_helper(answers: &[&str]) -> (i32, String) {
         .spawn()
         .expect("bash runs");
     let input = answers.iter().map(|a| format!("{a}\n")).collect::<String>();
-    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     let text = format!(
         "{}{}",
@@ -238,7 +268,10 @@ fn refused(answers: &[&str], why: &str) -> String {
     assert_eq!(code, 1, "should stop: {out}");
     assert!(out.contains(why), "expected {why:?} in: {out}");
     assert!(out.contains("Nothing was created"), "{out}");
-    assert!(!out.contains("Creating"), "must stop before touching the database: {out}");
+    assert!(
+        !out.contains("Creating"),
+        "must stop before touching the database: {out}"
+    );
     out
 }
 
@@ -260,12 +293,18 @@ fn helper_refuses_an_empty_name() {
 
 #[test]
 fn helper_refuses_mismatched_passwords() {
-    refused(&[DB, "test@gmail.com", "tester", PW, "a-different-pass"], "don't match");
+    refused(
+        &[DB, "test@gmail.com", "tester", PW, "a-different-pass"],
+        "don't match",
+    );
 }
 
 #[test]
 fn helper_refuses_short_passwords_before_building_anything() {
-    refused(&[DB, "test@gmail.com", "tester", "tester", "tester"], "at least 12 characters");
+    refused(
+        &[DB, "test@gmail.com", "tester", "tester", "tester"],
+        "at least 12 characters",
+    );
 }
 
 #[test]

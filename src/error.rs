@@ -29,6 +29,15 @@ pub enum AppError {
     InvalidCredentials,
     #[error("{0}")]
     RateLimited(String),
+    /// Wrong, expired or already used two-step code (or recovery code).
+    #[error("that code didn't work")]
+    MfaInvalid,
+    /// Super Admin and Admin must turn on two-step sign-in before anything else.
+    #[error("turn on two-step sign-in to continue")]
+    MfaSetupRequired,
+    /// The server has no MFA_ENCRYPTION_KEY, so two-step sign-in can't be turned on.
+    #[error("two-step sign-in isn't set up on this server yet")]
+    MfaUnavailable,
     /// Not enough stock for an item (message names it).
     #[error("{0}")]
     OutOfStock(String),
@@ -78,6 +87,17 @@ impl AppError {
                 self.to_string(),
             ),
             Self::RateLimited(m) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", m.clone()),
+            Self::MfaInvalid => (StatusCode::UNAUTHORIZED, "mfa_invalid", self.to_string()),
+            Self::MfaSetupRequired => (
+                StatusCode::FORBIDDEN,
+                "mfa_setup_required",
+                self.to_string(),
+            ),
+            Self::MfaUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "mfa_unavailable",
+                self.to_string(),
+            ),
             Self::OutOfStock(m) => (StatusCode::CONFLICT, "out_of_stock", m.clone()),
             Self::PriceChanged { .. } => (StatusCode::CONFLICT, "price_changed", self.to_string()),
             Self::OrderClosed => (StatusCode::CONFLICT, "order_closed", self.to_string()),

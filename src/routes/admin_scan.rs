@@ -24,6 +24,7 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/barcodes/duplicates", get(duplicates))
         .route("/barcodes/{code}", get(lookup))
         .route("/inventory/receipts", post(receive))
         .route("/inventory/expiring", get(expiring))
@@ -109,6 +110,25 @@ async fn lookup(
         })
         .collect();
     Ok(Json(json!({ "code": code, "matches": matches })))
+}
+
+/// `GET /admin/barcodes/duplicates`: barcodes that are on more than one product size (data from
+/// before barcodes had to be unique), to fix in Products.
+async fn duplicates(State(s): State<AppState>, _admin: AdminAuth) -> Result<Json<Vec<Value>>> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT v.barcode, p.id, p.name, v.id, v.size FROM variants v JOIN products p ON p.id = v.product_id
+          WHERE v.barcode IN (SELECT barcode FROM variants WHERE barcode IS NOT NULL GROUP BY barcode HAVING count(*) > 1)
+          ORDER BY v.barcode, p.name LIMIT 500",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(barcode, product_id, name, variant_id, size)| {
+                json!({ "barcode": barcode, "productId": product_id, "name": name, "variantId": variant_id, "size": size })
+            })
+            .collect(),
+    ))
 }
 
 /* ───────────────────────── Goods-in ───────────────────────── */

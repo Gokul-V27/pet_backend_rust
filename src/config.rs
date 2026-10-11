@@ -3,6 +3,17 @@
 
 use anyhow::{Context, bail};
 use axum::http::HeaderValue;
+use sha2::{Digest, Sha256};
+
+/// A 32-byte encryption key that never shows up in logs or `{:?}` output.
+#[derive(Clone)]
+pub struct SecretKey(pub [u8; 32]);
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretKey(***)")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Env {
@@ -37,6 +48,13 @@ pub struct Config {
     pub catalogue_cache_seconds: u64,
     /// Per-visitor request limits; `None` when `RATE_LIMIT=off` (e.g. for a local load test).
     pub rate_limits: Option<crate::services::rate_limit::Limits>,
+    /// Encrypts staff authenticator secrets in the database (`MFA_ENCRYPTION_KEY`, 64 hex
+    /// characters). Development derives one from OTP_PEPPER when it isn't set. `None`: staff can't
+    /// turn on two-step sign-in.
+    pub mfa_key: Option<SecretKey>,
+    /// Super Admin and Admin must use two-step sign-in (`STAFF_MFA_REQUIRED`; on by default in
+    /// production). Until they set it up, their session can only reach the setup screens.
+    pub staff_mfa_required: bool,
 }
 
 /// MSG91 (sign-in codes by SMS). Server-only.
@@ -122,7 +140,9 @@ impl Config {
         if otp_dev_echo && env == Env::Production {
             bail!("OTP_DEV_ECHO=true is not allowed unless APP_ENV=development");
         }
-        let otp_dev_code = get("OTP_DEV_CODE").map(|c| c.trim().to_owned()).filter(|c| !c.is_empty());
+        let otp_dev_code = get("OTP_DEV_CODE")
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty());
         if let Some(code) = &otp_dev_code {
             if env == Env::Production {
                 bail!("OTP_DEV_CODE is not allowed unless APP_ENV=development");
@@ -130,6 +150,40 @@ impl Config {
             if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
                 bail!("OTP_DEV_CODE must be exactly 6 digits");
             }
+        }
+        let mfa_key = match get("MFA_ENCRYPTION_KEY")
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty())
+        {
+            Some(k) => {
+                let bytes = hex::decode(&k).ok().filter(|b| b.len() == 32).context(
+                    "MFA_ENCRYPTION_KEY must be 64 hex characters (openssl rand -hex 32)",
+                )?;
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                Some(SecretKey(key))
+            }
+            // Development only: a stable key derived from the pepper, so local two-step sign-in works.
+            None if env == Env::Development => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&Sha256::digest(
+                    format!("wagwell-dev-mfa:{otp_pepper}").as_bytes(),
+                ));
+                Some(SecretKey(key))
+            }
+            None => None,
+        };
+        let staff_mfa_required = match get("STAFF_MFA_REQUIRED").as_deref().map(str::trim) {
+            Some("true") => true,
+            Some("false") => false,
+            None | Some("") => env == Env::Production,
+            Some(other) => bail!("STAFF_MFA_REQUIRED must be true or false, not {other:?}"),
+        };
+        if staff_mfa_required && mfa_key.is_none() {
+            bail!(
+                "two-step sign-in for Super Admin and Admin is on by default in production and needs \
+                 MFA_ENCRYPTION_KEY (openssl rand -hex 32). Set it, or STAFF_MFA_REQUIRED=false to postpone."
+            );
         }
         let cors_origins = get("CORS_ORIGINS")
             .unwrap_or_else(|| "http://localhost:3000,http://localhost:3001".into())
@@ -224,7 +278,8 @@ impl Config {
         let db_max_connections = number(&get, "DB_MAX_CONNECTIONS", 10, 1..=200)?;
         let catalogue_cache_seconds = number(&get, "CATALOGUE_CACHE_SECONDS", 10, 0..=300)?;
 
-        let rate_limits = if get("RATE_LIMIT").is_some_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+        let rate_limits = if get("RATE_LIMIT").is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
+        {
             None
         } else {
             Some(crate::services::rate_limit::Limits::new(
@@ -247,6 +302,8 @@ impl Config {
             otp_pepper,
             otp_dev_echo,
             otp_dev_code,
+            mfa_key,
+            staff_mfa_required,
         })
     }
 
@@ -257,16 +314,28 @@ impl Config {
 }
 
 /// A whole-number setting with a default and an allowed range, e.g. `DB_MAX_CONNECTIONS=20`.
-fn number<T>(get: &impl Fn(&str) -> Option<String>, key: &str, default: T, range: std::ops::RangeInclusive<T>) -> anyhow::Result<T>
+fn number<T>(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: T,
+    range: std::ops::RangeInclusive<T>,
+) -> anyhow::Result<T>
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
 {
-    let Some(raw) = get(key).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) else {
+    let Some(raw) = get(key)
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    else {
         return Ok(default);
     };
     match raw.parse::<T>() {
         Ok(n) if range.contains(&n) => Ok(n),
-        _ => bail!("{key} must be a whole number from {} to {}", range.start(), range.end()),
+        _ => bail!(
+            "{key} must be a whole number from {} to {}",
+            range.start(),
+            range.end()
+        ),
     }
 }
 
@@ -275,7 +344,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn cfg(pairs: &[(&str, &str)]) -> anyhow::Result<Config> {
+    fn raw_cfg(pairs: &[(&str, &str)]) -> anyhow::Result<Config> {
         let m: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -283,7 +352,49 @@ mod tests {
         Config::from_lookup(|k| m.get(k).cloned())
     }
 
+    /// Like production needs: an MFA key unless the test sets its own MFA settings.
+    fn cfg(pairs: &[(&str, &str)]) -> anyhow::Result<Config> {
+        let mut v = pairs.to_vec();
+        if !v.iter().any(|(k, _)| k.starts_with("MFA_") || *k == "STAFF_MFA_REQUIRED") {
+            v.push(("MFA_ENCRYPTION_KEY", MFA_KEY));
+        }
+        raw_cfg(&v)
+    }
+
     const PEPPER: &str = "0123456789abcdef0123456789abcdef";
+    const MFA_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    #[test]
+    fn production_needs_an_mfa_key_for_required_two_step_sign_in() {
+        let base = [("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)];
+        let err = raw_cfg(&base).unwrap_err().to_string();
+        assert!(err.contains("MFA_ENCRYPTION_KEY"), "{err}");
+
+        let mut with_key = base.to_vec();
+        with_key.push(("MFA_ENCRYPTION_KEY", MFA_KEY));
+        let c = raw_cfg(&with_key).unwrap();
+        assert!(c.staff_mfa_required && c.mfa_key.is_some());
+        assert!(!format!("{c:?}").contains("00112233"), "the key never shows in logs");
+
+        let mut postponed = base.to_vec();
+        postponed.push(("STAFF_MFA_REQUIRED", "false"));
+        let c = raw_cfg(&postponed).unwrap();
+        assert!(!c.staff_mfa_required && c.mfa_key.is_none());
+
+        let mut bad = base.to_vec();
+        bad.push(("MFA_ENCRYPTION_KEY", "too-short"));
+        assert!(raw_cfg(&bad).is_err());
+        let mut odd = base.to_vec();
+        odd.push(("STAFF_MFA_REQUIRED", "yes"));
+        assert!(raw_cfg(&odd).is_err());
+    }
+
+    #[test]
+    fn development_has_a_derived_key_and_does_not_require_two_step() {
+        let c = raw_cfg(&[("APP_ENV", "development"), ("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)]).unwrap();
+        assert!(c.mfa_key.is_some());
+        assert!(!c.staff_mfa_required);
+    }
 
     #[test]
     fn defaults_to_production() {
@@ -304,12 +415,30 @@ mod tests {
         let d = cfg(&base).unwrap();
         let lim = d.rate_limits.as_ref().expect("on by default");
         assert_eq!((lim.reads.per_minute, lim.writes.per_minute), (240.0, 60.0));
-        assert!(with(&[("RATE_LIMIT", "off")]).unwrap().rate_limits.is_none());
+        assert!(
+            with(&[("RATE_LIMIT", "off")])
+                .unwrap()
+                .rate_limits
+                .is_none()
+        );
         assert!(with(&[("RATE_LIMIT_READS_PER_MINUTE", "0")]).is_err());
         assert_eq!((d.db_max_connections, d.catalogue_cache_seconds), (10, 10));
-        let set = with(&[("DB_MAX_CONNECTIONS", "25"), ("CATALOGUE_CACHE_SECONDS", "0")]).unwrap();
-        assert_eq!((set.db_max_connections, set.catalogue_cache_seconds), (25, 0));
-        for bad in [("DB_MAX_CONNECTIONS", "0"), ("DB_MAX_CONNECTIONS", "201"), ("DB_MAX_CONNECTIONS", "lots"), ("CATALOGUE_CACHE_SECONDS", "301"), ("CATALOGUE_CACHE_SECONDS", "-1")] {
+        let set = with(&[
+            ("DB_MAX_CONNECTIONS", "25"),
+            ("CATALOGUE_CACHE_SECONDS", "0"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (set.db_max_connections, set.catalogue_cache_seconds),
+            (25, 0)
+        );
+        for bad in [
+            ("DB_MAX_CONNECTIONS", "0"),
+            ("DB_MAX_CONNECTIONS", "201"),
+            ("DB_MAX_CONNECTIONS", "lots"),
+            ("CATALOGUE_CACHE_SECONDS", "301"),
+            ("CATALOGUE_CACHE_SECONDS", "-1"),
+        ] {
             assert!(with(&[bad]).is_err(), "{bad:?}");
         }
     }

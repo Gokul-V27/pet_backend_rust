@@ -147,11 +147,13 @@ async fn rider_delivers_a_cash_order_while_the_customer_watches(pool: PgPool) {
     .await;
     assert_eq!(created.status(), StatusCode::OK);
     let rider_id = json(created).await["id"].as_str().unwrap().to_owned();
-    sqlx::query("INSERT INTO riders (mobile, name, password_hash) VALUES ('9000000002', 'Other Rider', $1)")
-        .bind(password::hash(PASSWORD).unwrap())
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO riders (mobile, name, password_hash) VALUES ('9000000002', 'Other Rider', $1)",
+    )
+    .bind(password::hash(PASSWORD).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Packed and handed to Ravi.
     let pack = send(
@@ -322,16 +324,20 @@ async fn too_many_wrong_codes_lock_the_handover(pool: PgPool) {
     let app = router(pool.clone());
     let customer = app_sign_in(&app, &pool, "9876543210").await;
     let number = place_order(&app, &customer).await;
-    sqlx::query("INSERT INTO riders (mobile, name, password_hash) VALUES ('9000000001', 'Ravi', $1)")
-        .bind(password::hash(PASSWORD).unwrap())
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE orders SET status = 'packed', rider_id = (SELECT id FROM riders) WHERE number = $1")
-        .bind(&number)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO riders (mobile, name, password_hash) VALUES ('9000000001', 'Ravi', $1)",
+    )
+    .bind(password::hash(PASSWORD).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE orders SET status = 'packed', rider_id = (SELECT id FROM riders) WHERE number = $1",
+    )
+    .bind(&number)
+    .execute(&pool)
+    .await
+    .unwrap();
     let ravi = rider_login(&app, "9000000001").await;
     let start = send(
         &app,

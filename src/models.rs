@@ -24,6 +24,12 @@ pub enum AdminRole {
 }
 
 impl AdminRole {
+    /// These roles can move money and change everything, so they must use two-step sign-in when
+    /// the server requires it (`STAFF_MFA_REQUIRED`).
+    pub fn must_use_mfa(self) -> bool {
+        matches!(self, Self::SuperAdmin | Self::Admin)
+    }
+
     /// Products, categories and their pictures (same as the admin website's role switcher).
     pub fn can_manage_catalogue(self) -> bool {
         matches!(

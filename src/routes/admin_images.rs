@@ -1,6 +1,7 @@
 //! Staff picture uploads. `POST /api/v1/admin/images` (multipart: `file`, optional `folder`)
 //! → `{ key, url }`. `DELETE /api/v1/admin/images/{*key}` removes one this server made.
-//! Needs a staff session whose role may manage the catalogue.
+//! Needs a staff session whose role may manage the catalogue. Hidden metadata (GPS position,
+//! camera, comments) is removed before a picture is stored, because stored pictures are public.
 
 use axum::{
     Json, Router,
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use crate::auth::AdminAuth;
 use crate::error::{AppError, Result};
 use crate::repo::audit;
+use crate::services::image_meta;
 use crate::services::storage::{self, ImageKind, MAX_IMAGE_BYTES, Storage};
 use crate::state::AppState;
 
@@ -81,6 +83,11 @@ async fn upload(
     }
     let kind = ImageKind::sniff(&bytes)
         .ok_or_else(|| AppError::invalid("use a JPEG, PNG or WebP picture"))?;
+    // Published pictures must not say where they were taken: drop GPS, camera and other metadata.
+    let bytes =
+        bytes::Bytes::from(image_meta::strip(kind, &bytes).map_err(|_| {
+            AppError::invalid("that picture file looks damaged; try saving it again")
+        })?);
 
     let key = storage::new_key(&folder, kind, chrono::Utc::now());
     let size = bytes.len();

@@ -132,7 +132,11 @@ impl ResponseCache {
 }
 
 /// Serves public catalogue GETs from memory when a fresh copy exists; otherwise loads it once.
-pub async fn serve_public_from_cache(State(s): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn serve_public_from_cache(
+    State(s): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let cache = &s.cache;
     if !cache.enabled() || req.method() != Method::GET {
         return next.run(req).await;
@@ -168,7 +172,11 @@ pub async fn serve_public_from_cache(State(s): State<AppState>, req: Request, ne
 
 /// After any successful change by staff (products, prices, offers, stock, orders), drop the
 /// cached catalogue so shoppers see the change on their next page.
-pub async fn clear_after_admin_change(State(s): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn clear_after_admin_change(
+    State(s): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let changes = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let res = next.run(req).await;
     if changes && res.status().is_success() {
@@ -182,7 +190,11 @@ mod tests {
     use super::*;
 
     fn entry(body: &'static str) -> Entry {
-        Entry { stored: Instant::now(), content_type: None, body: Bytes::from_static(body.as_bytes()) }
+        Entry {
+            stored: Instant::now(),
+            content_type: None,
+            body: Bytes::from_static(body.as_bytes()),
+        }
     }
 
     #[test]
@@ -203,7 +215,11 @@ mod tests {
         assert!(c.is_empty());
         c.store("/b".into(), before, entry("stale")); // loaded before the clear
         assert!(c.fresh("/b").is_none());
-        c.store("/b".into(), c.generation.load(Ordering::SeqCst), entry("new"));
+        c.store(
+            "/b".into(),
+            c.generation.load(Ordering::SeqCst),
+            entry("new"),
+        );
         assert_eq!(c.fresh("/b").unwrap().body, "new");
     }
 

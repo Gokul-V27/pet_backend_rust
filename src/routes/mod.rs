@@ -27,10 +27,12 @@ pub fn api(state: &AppState) -> Router<AppState> {
     Router::new()
         .merge(customer_auth::routes())
         // The public catalogue is the same for every shopper: served from a short-lived cache.
-        .merge(public_catalogue::routes().route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            cache::serve_public_from_cache,
-        )))
+        .merge(
+            public_catalogue::routes().route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                cache::serve_public_from_cache,
+            )),
+        )
         .merge(orders::routes())
         .merge(rider::routes())
         .nest(

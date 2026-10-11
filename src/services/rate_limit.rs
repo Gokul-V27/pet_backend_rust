@@ -31,7 +31,11 @@ pub struct Rule {
 
 impl Rule {
     const fn new(name: &'static str, burst: f64, per_minute: f64) -> Self {
-        Self { name, burst, per_minute }
+        Self {
+            name,
+            burst,
+            per_minute,
+        }
     }
 }
 
@@ -54,8 +58,16 @@ pub const COUPON_CHECK: Rule = Rule::new("coupon-check", 30.0, 30.0);
 impl Limits {
     pub fn new(reads_per_minute: u32, writes_per_minute: u32) -> Self {
         Self {
-            reads: Rule::new("reads", f64::from(reads_per_minute), f64::from(reads_per_minute)),
-            writes: Rule::new("writes", f64::from(writes_per_minute), f64::from(writes_per_minute)),
+            reads: Rule::new(
+                "reads",
+                f64::from(reads_per_minute),
+                f64::from(reads_per_minute),
+            ),
+            writes: Rule::new(
+                "writes",
+                f64::from(writes_per_minute),
+                f64::from(writes_per_minute),
+            ),
         }
     }
 
@@ -69,7 +81,11 @@ impl Limits {
         let special = match path {
             "/api/v1/auth/otp/request" => Some(OTP_REQUEST),
             "/api/v1/auth/otp/verify" => Some(OTP_VERIFY),
-            "/api/v1/admin/auth/login" | "/api/v1/rider/auth/login" => Some(STAFF_LOGIN),
+            // Passwords, two-step codes and rider setup codes: guessing is slowed the same way.
+            "/api/v1/admin/auth/login"
+            | "/api/v1/admin/auth/mfa/verify"
+            | "/api/v1/rider/auth/login"
+            | "/api/v1/rider/auth/setup" => Some(STAFF_LOGIN),
             "/api/v1/coupons/validate" => Some(COUPON_CHECK),
             _ => None,
         };
@@ -102,7 +118,10 @@ impl RateLimiter {
         for r in rules {
             let b = buckets
                 .entry((r.name, client.to_owned()))
-                .or_insert(Bucket { tokens: r.burst, updated: now });
+                .or_insert(Bucket {
+                    tokens: r.burst,
+                    updated: now,
+                });
             let elapsed = now.duration_since(b.updated).as_secs_f64();
             b.tokens = (b.tokens + elapsed * r.per_minute / 60.0).min(r.burst);
             b.updated = now;
@@ -146,7 +165,10 @@ pub async fn limit_requests(State(s): State<AppState>, req: Request, next: Next)
         return next.run(req).await;
     };
     let path = req.uri().path();
-    if path == "/health" || path == "/ready" || path.starts_with("/api/v1/payments/razorpay/webhook") {
+    if path == "/health"
+        || path == "/ready"
+        || path.starts_with("/api/v1/payments/razorpay/webhook")
+    {
         return next.run(req).await;
     }
     let rules = limits.rules_for(req.method(), path);
@@ -155,10 +177,9 @@ pub async fn limit_requests(State(s): State<AppState>, req: Request, next: Next)
         Ok(()) => next.run(req).await,
         Err(wait) => {
             let secs = wait.as_secs().max(1);
-            let mut res = AppError::RateLimited(format!(
-                "too many requests; try again in {secs} seconds"
-            ))
-            .into_response();
+            let mut res =
+                AppError::RateLimited(format!("too many requests; try again in {secs} seconds"))
+                    .into_response();
             res.headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from(secs));
             res
@@ -220,12 +241,34 @@ mod tests {
     #[test]
     fn sensitive_routes_add_their_own_rule() {
         let lim = Limits::new(240, 30);
-        let names = |m: Method, p: &str| lim.rules_for(&m, p).iter().map(|r| r.name).collect::<Vec<_>>();
+        let names = |m: Method, p: &str| {
+            lim.rules_for(&m, p)
+                .iter()
+                .map(|r| r.name)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(Method::GET, "/api/v1/products"), ["reads"]);
         assert_eq!(names(Method::POST, "/api/v1/orders"), ["writes"]);
-        assert_eq!(names(Method::POST, "/api/v1/auth/otp/request"), ["writes", "otp-request"]);
-        assert_eq!(names(Method::POST, "/api/v1/admin/auth/login"), ["writes", "staff-login"]);
-        assert_eq!(names(Method::POST, "/api/v1/coupons/validate"), ["writes", "coupon-check"]);
+        assert_eq!(
+            names(Method::POST, "/api/v1/auth/otp/request"),
+            ["writes", "otp-request"]
+        );
+        assert_eq!(
+            names(Method::POST, "/api/v1/admin/auth/login"),
+            ["writes", "staff-login"]
+        );
+        assert_eq!(
+            names(Method::POST, "/api/v1/admin/auth/mfa/verify"),
+            ["writes", "staff-login"]
+        );
+        assert_eq!(
+            names(Method::POST, "/api/v1/rider/auth/setup"),
+            ["writes", "staff-login"]
+        );
+        assert_eq!(
+            names(Method::POST, "/api/v1/coupons/validate"),
+            ["writes", "coupon-check"]
+        );
     }
 
     #[test]

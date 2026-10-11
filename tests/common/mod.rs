@@ -29,6 +29,7 @@ pub fn config() -> Config {
 pub fn router(pool: PgPool) -> Router {
     app(AppState {
         db: pool,
+        cache: AppState::cache_from(&config()),
         cfg: Arc::new(config()),
         storage: None,
         razorpay: None,
@@ -46,6 +47,7 @@ pub fn router_with_razorpay(pool: PgPool) -> Router {
     .unwrap();
     app(AppState {
         db: pool,
+        cache: AppState::cache_from(&config()),
         cfg: Arc::new(config()),
         storage: None,
         razorpay: Some(rzp),

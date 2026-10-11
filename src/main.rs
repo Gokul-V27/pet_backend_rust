@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let db = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(cfg.db_max_connections)
         .connect(&cfg.database_url)
         .await
         .context("could not connect to the database")?;
@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let state = AppState {
         db,
+        cache: AppState::cache_from(&cfg),
         cfg: Arc::new(cfg),
         storage,
         razorpay,

@@ -29,6 +29,12 @@ pub struct Config {
     pub razorpay: Option<RazorpayConfig>,
     /// `None` when no SMS provider is set: customers can't sign in outside development.
     pub sms: Option<SmsConfig>,
+    /// Most database connections the server opens (`DB_MAX_CONNECTIONS`, default 10).
+    /// Keep it under the database plan's limit, shared across every server instance.
+    pub db_max_connections: u32,
+    /// How long public catalogue answers are reused before asking the database again
+    /// (`CATALOGUE_CACHE_SECONDS`, default 10; 0 switches the cache off).
+    pub catalogue_cache_seconds: u64,
 }
 
 /// MSG91 (sign-in codes by SMS). Server-only.
@@ -213,8 +219,13 @@ impl Config {
             });
             format!("{host}:8080")
         };
+        let db_max_connections = number(&get, "DB_MAX_CONNECTIONS", 10, 1..=200)?;
+        let catalogue_cache_seconds = number(&get, "CATALOGUE_CACHE_SECONDS", 10, 0..=300)?;
+
         Ok(Self {
             env,
+            db_max_connections,
+            catalogue_cache_seconds,
             storage,
             razorpay,
             sms,
@@ -230,6 +241,20 @@ impl Config {
     /// Cookies are only sent over HTTPS outside development.
     pub fn cookie_secure(&self) -> bool {
         self.env == Env::Production
+    }
+}
+
+/// A whole-number setting with a default and an allowed range, e.g. `DB_MAX_CONNECTIONS=20`.
+fn number<T>(get: &impl Fn(&str) -> Option<String>, key: &str, default: T, range: std::ops::RangeInclusive<T>) -> anyhow::Result<T>
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let Some(raw) = get(key).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) else {
+        return Ok(default);
+    };
+    match raw.parse::<T>() {
+        Ok(n) if range.contains(&n) => Ok(n),
+        _ => bail!("{key} must be a whole number from {} to {}", range.start(), range.end()),
     }
 }
 
@@ -254,6 +279,23 @@ mod tests {
         assert_eq!(c.env, Env::Production);
         assert!(c.cookie_secure());
         assert_eq!(c.cors_origins.len(), 2);
+    }
+
+    #[test]
+    fn pool_size_and_cache_time_have_safe_defaults_and_limits() {
+        let base = [("DATABASE_URL", "postgres://x"), ("OTP_PEPPER", PEPPER)];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut v = base.to_vec();
+            v.extend_from_slice(extra);
+            cfg(&v)
+        };
+        let d = cfg(&base).unwrap();
+        assert_eq!((d.db_max_connections, d.catalogue_cache_seconds), (10, 10));
+        let set = with(&[("DB_MAX_CONNECTIONS", "25"), ("CATALOGUE_CACHE_SECONDS", "0")]).unwrap();
+        assert_eq!((set.db_max_connections, set.catalogue_cache_seconds), (25, 0));
+        for bad in [("DB_MAX_CONNECTIONS", "0"), ("DB_MAX_CONNECTIONS", "201"), ("DB_MAX_CONNECTIONS", "lots"), ("CATALOGUE_CACHE_SECONDS", "301"), ("CATALOGUE_CACHE_SECONDS", "-1")] {
+            assert!(with(&[bad]).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

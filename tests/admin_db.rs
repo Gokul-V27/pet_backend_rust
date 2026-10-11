@@ -548,6 +548,7 @@ async fn without_an_sms_provider_no_code_is_pretended(pool: PgPool) {
     .unwrap();
     let app = app(AppState {
         db: pool.clone(),
+        cache: AppState::cache_from(&cfg),
         cfg: Arc::new(cfg),
         storage: None,
         razorpay: None,

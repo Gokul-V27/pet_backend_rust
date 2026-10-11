@@ -45,7 +45,7 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .merge(routes::health::routes())
-        .nest("/api/v1", routes::api())
+        .nest("/api/v1", routes::api(&state))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -58,8 +58,9 @@ pub fn app(state: AppState) -> Router {
                     services::storage::MAX_IMAGE_BYTES + 128 * 1024,
                 ))
                 .layer(CompressionLayer::new())
-                // API answers are personal: never cached, never sniffed, never framed.
-                .layer(SetResponseHeaderLayer::overriding(
+                // API answers are personal: never cached, never sniffed, never framed. The one
+                // exception is the public catalogue, which sets its own short public cache time.
+                .layer(SetResponseHeaderLayer::if_not_present(
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("no-store"),
                 ))

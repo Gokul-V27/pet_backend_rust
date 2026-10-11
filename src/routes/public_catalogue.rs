@@ -204,10 +204,8 @@ async fn validate_coupon(
         return Err(AppError::invalid("invalid or expired coupon"));
     };
 
-    if let Some(limit) = c.usage_limit {
-        if c.used >= limit {
-            return Err(AppError::invalid("this coupon has reached its usage limit"));
-        }
+    if c.usage_limit.is_some_and(|limit| c.used >= limit) {
+        return Err(AppError::invalid("this coupon has reached its usage limit"));
     }
 
     let coupon_obj = Coupon::from(c);

@@ -775,9 +775,12 @@ async fn save_settings(
 
 // ═════════════════════════ Audit log ═════════════════════════
 
+/// `(id, at, actor type or role, actor id, action, target, detail)`.
+type AuditRow = (i64, chrono::DateTime<chrono::Utc>, String, Option<uuid::Uuid>, String, Option<String>, Value);
+
 async fn list_audit(State(s): State<AppState>, admin: AdminAuth) -> Result<Json<Vec<Value>>> {
     allow(admin.role.can_view_audit())?;
-    let rows: Vec<(i64, chrono::DateTime<chrono::Utc>, String, Option<uuid::Uuid>, String, Option<String>, Value)> = sqlx::query_as(
+    let rows: Vec<AuditRow> = sqlx::query_as(
         "SELECT l.id, l.at, COALESCE(u.role, l.actor_type), l.actor_id, l.action || COALESCE(' by ' || u.email, ''), l.target, l.detail
            FROM audit_log l LEFT JOIN admin_users u ON l.actor_type = 'admin' AND u.id = l.actor_id
           ORDER BY l.at DESC LIMIT 300"

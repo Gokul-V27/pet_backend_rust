@@ -30,6 +30,7 @@ pub fn router(pool: PgPool) -> Router {
     app(AppState {
         db: pool,
         cache: AppState::cache_from(&config()),
+        limiter: Default::default(),
         cfg: Arc::new(config()),
         storage: None,
         razorpay: None,
@@ -48,6 +49,7 @@ pub fn router_with_razorpay(pool: PgPool) -> Router {
     app(AppState {
         db: pool,
         cache: AppState::cache_from(&config()),
+        limiter: Default::default(),
         cfg: Arc::new(config()),
         storage: None,
         razorpay: Some(rzp),

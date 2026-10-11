@@ -4,6 +4,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::services::cache::ResponseCache;
+use crate::services::rate_limit::RateLimiter;
 use crate::services::razorpay::Razorpay;
 use crate::services::sms::Sms;
 use crate::services::storage::Storage;
@@ -20,6 +21,8 @@ pub struct AppState {
     pub sms: Option<Sms>,
     /// Short-lived copy of the public catalogue (see services/cache.rs).
     pub cache: Arc<ResponseCache>,
+    /// Per-visitor request counts (see services/rate_limit.rs).
+    pub limiter: Arc<RateLimiter>,
 }
 
 impl AppState {

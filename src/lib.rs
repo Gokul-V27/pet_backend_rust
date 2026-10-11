@@ -46,6 +46,11 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .merge(routes::health::routes())
         .nest("/api/v1", routes::api(&state))
+        // Per-visitor limits, inside CORS so a 429 still reaches the website readably.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            services::rate_limit::limit_requests,
+        ))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

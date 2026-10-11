@@ -35,6 +35,8 @@ pub struct Config {
     /// How long public catalogue answers are reused before asking the database again
     /// (`CATALOGUE_CACHE_SECONDS`, default 10; 0 switches the cache off).
     pub catalogue_cache_seconds: u64,
+    /// Per-visitor request limits; `None` when `RATE_LIMIT=off` (e.g. for a local load test).
+    pub rate_limits: Option<crate::services::rate_limit::Limits>,
 }
 
 /// MSG91 (sign-in codes by SMS). Server-only.
@@ -222,8 +224,18 @@ impl Config {
         let db_max_connections = number(&get, "DB_MAX_CONNECTIONS", 10, 1..=200)?;
         let catalogue_cache_seconds = number(&get, "CATALOGUE_CACHE_SECONDS", 10, 0..=300)?;
 
+        let rate_limits = if get("RATE_LIMIT").is_some_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+            None
+        } else {
+            Some(crate::services::rate_limit::Limits::new(
+                number(&get, "RATE_LIMIT_READS_PER_MINUTE", 240, 1..=100_000)?,
+                number(&get, "RATE_LIMIT_WRITES_PER_MINUTE", 60, 1..=100_000)?,
+            ))
+        };
+
         Ok(Self {
             env,
+            rate_limits,
             db_max_connections,
             catalogue_cache_seconds,
             storage,
@@ -290,6 +302,10 @@ mod tests {
             cfg(&v)
         };
         let d = cfg(&base).unwrap();
+        let lim = d.rate_limits.as_ref().expect("on by default");
+        assert_eq!((lim.reads.per_minute, lim.writes.per_minute), (240.0, 60.0));
+        assert!(with(&[("RATE_LIMIT", "off")]).unwrap().rate_limits.is_none());
+        assert!(with(&[("RATE_LIMIT_READS_PER_MINUTE", "0")]).is_err());
         assert_eq!((d.db_max_connections, d.catalogue_cache_seconds), (10, 10));
         let set = with(&[("DB_MAX_CONNECTIONS", "25"), ("CATALOGUE_CACHE_SECONDS", "0")]).unwrap();
         assert_eq!((set.db_max_connections, set.catalogue_cache_seconds), (25, 0));

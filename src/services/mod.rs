@@ -4,6 +4,7 @@ pub mod orders;
 pub mod otp;
 pub mod password;
 pub mod pricing;
+pub mod rate_limit;
 pub mod razorpay;
 pub mod sms;
 pub mod storage;

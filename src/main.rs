@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         cache: AppState::cache_from(&cfg),
+        limiter: Default::default(),
         cfg: Arc::new(cfg),
         storage,
         razorpay,
@@ -98,7 +99,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-    axum::serve(listener, wagwell_api::app(state))
+    axum::serve(
+        listener,
+        wagwell_api::app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
